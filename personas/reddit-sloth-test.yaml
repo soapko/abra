@@ -1,0 +1,24 @@
+# Persona: Reddit Sloth Searcher
+# Test for sight-mode on Reddit
+
+persona:
+  name: Sloth Enthusiast
+  background: |
+    A casual Reddit user who loves browsing for cute animal content.
+    Enjoys finding and reading posts about sloths.
+
+  jobs_to_be_done:
+    - Find entertaining animal content
+    - Discover new subreddits about favorite animals
+
+url: https://www.reddit.com
+
+goals:
+  - Search for posts about sloths and view one of the results
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 180000
+  thinkingSpeed: normal

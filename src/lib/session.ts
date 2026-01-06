@@ -9,7 +9,19 @@ import type { PersonaConfig } from './persona.js';
 import { getThinkingDelay } from './persona.js';
 import type { PageState, PageElement } from './page-analyzer.js';
 import { PAGE_ANALYZER_SCRIPT } from './page-analyzer.js';
-import { getNextAction, formatAction, type ThinkingResult } from './llm.js';
+import {
+  getNextAction,
+  getNextActionFromScreenshot,
+  formatAction,
+  formatVisionAction,
+  type ThinkingResult,
+  type VisionThinkingResult,
+} from './llm.js';
+import {
+  getAnnotationScript,
+  getRemoveAnnotationScript,
+  formatElementLegend,
+} from './screenshot-annotator.js';
 import { executeAction, getElementCenter, getHumanDelay, type Browser } from './action-executor.js';
 import {
   getInitScript,
@@ -40,6 +52,7 @@ export interface SessionResult {
 export interface SessionOptions {
   outputDir: string;
   headless?: boolean;
+  sightMode?: boolean;
   onThought?: (thought: string, goalIndex: number) => void;
   onAction?: (action: string, goalIndex: number) => void;
 }
@@ -78,8 +91,9 @@ async function runGoal(
   let actionCount = 0;
   const timeout = persona.options.timeout;
   const thinkingDelay = getThinkingDelay(persona.options.thinkingSpeed);
+  const sightMode = options.sightMode ?? false;
 
-  debug('Starting goal %d: %s', goalIndex + 1, goal);
+  debug('Starting goal %d: %s (sightMode: %s)', goalIndex + 1, goal, sightMode);
 
   // Initialize speech bubble
   await browser.evaluate(getInitScript(persona.persona.name));
@@ -97,44 +111,102 @@ async function runGoal(
       // Small delay to let dynamic content render
       await browser.wait(500);
 
-      // Analyze current page
+      // Analyze current page (always needed for element mapping)
       const pageState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
       debug('Page analyzed: %s (%d elements)', pageState.title, pageState.elements.length);
 
-      // Get next action from LLM
-      let result: ThinkingResult;
-      try {
-        result = await getNextAction(persona, goal, pageState, actionHistory);
-      } catch (err) {
-        debug('LLM error:', err);
-        // Wait and retry once
-        await browser.wait(2000);
-        result = await getNextAction(persona, goal, pageState, actionHistory);
+      // Variables for action result
+      let thought: string;
+      let actionType: string;
+      let actionDesc: string;
+      let targetElement: PageElement | null = null;
+      let actionToExecute: ThinkingResult['action'];
+
+      if (sightMode) {
+        // SIGHT MODE: Use annotated screenshot for decision-making
+
+        // Inject annotations onto the page
+        await browser.evaluate(getAnnotationScript(pageState.elements));
+        debug('Annotations injected (%d elements)', pageState.elements.length);
+
+        // Capture annotated screenshot
+        const screenshot = await browser.screenshot();
+        debug('Annotated screenshot captured (%d bytes)', screenshot.length);
+
+        // Remove annotations
+        await browser.evaluate(getRemoveAnnotationScript());
+
+        // Generate element legend for the prompt
+        const elementLegend = formatElementLegend(pageState.elements);
+
+        let visionResult: VisionThinkingResult;
+        try {
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory);
+        } catch (err) {
+          debug('Vision LLM error:', err);
+          await browser.wait(2000);
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory);
+        }
+
+        thought = visionResult.thought;
+        actionType = visionResult.action.type;
+        actionDesc = formatVisionAction(visionResult.action);
+
+        // Find the element by ID from the vision response
+        if (visionResult.action.elementId !== undefined) {
+          targetElement = pageState.elements.find(el => el.id === visionResult.action.elementId) ?? null;
+          debug('Vision selected element [%d]: %s',
+            visionResult.action.elementId,
+            targetElement?.selector ?? 'not found'
+          );
+        }
+
+        // Convert vision action to standard action for execution
+        actionToExecute = {
+          ...visionResult.action,
+          elementId: targetElement?.id,
+          selector: targetElement?.selector,
+        };
+      } else {
+        // STANDARD MODE: Use HTML analysis for decision-making
+        let result: ThinkingResult;
+        try {
+          result = await getNextAction(persona, goal, pageState, actionHistory);
+        } catch (err) {
+          debug('LLM error:', err);
+          await browser.wait(2000);
+          result = await getNextAction(persona, goal, pageState, actionHistory);
+        }
+
+        thought = result.thought;
+        actionType = result.action.type;
+        actionDesc = formatAction(result.action);
+        actionToExecute = result.action;
+
+        targetElement = result.action.elementId !== undefined
+          ? pageState.elements.find(el => el.id === result.action.elementId) ?? null
+          : null;
       }
 
       // Log thought
-      transcript.push(`[${new Date().toISOString()}] Thought: ${result.thought}`);
-      options.onThought?.(result.thought, goalIndex);
-      debug('Thought: %s', result.thought);
+      transcript.push(`[${new Date().toISOString()}] Thought: ${thought}`);
+      options.onThought?.(thought, goalIndex);
+      debug('Thought: %s', thought);
 
       // Show speech bubble at target element position
-      const targetElement = result.action.elementId !== undefined
-        ? pageState.elements.find(el => el.id === result.action.elementId)
-        : null;
-
       if (targetElement) {
         const center = getElementCenter(targetElement);
-        await browser.evaluate(getShowScript(result.thought, center.x, center.y));
+        await browser.evaluate(getShowScript(thought, center.x, center.y));
       } else {
         // Show at center of viewport
-        await browser.evaluate(getShowScript(result.thought, 700, 400));
+        await browser.evaluate(getShowScript(thought, 700, 400));
       }
 
       // Human-like thinking pause
       await browser.wait(getHumanDelay(thinkingDelay.min, thinkingDelay.max));
 
       // Check for terminal actions
-      if (result.action.type === 'done') {
+      if (actionType === 'done') {
         await browser.evaluate(getHideScript());
         return {
           description: goal,
@@ -145,25 +217,24 @@ async function runGoal(
         };
       }
 
-      if (result.action.type === 'failed') {
+      if (actionType === 'failed') {
         await browser.evaluate(getHideScript());
         return {
           description: goal,
           status: 'failed',
           duration: Date.now() - startTime,
           actions: actionCount,
-          failureReason: result.action.reason,
+          failureReason: actionToExecute.reason,
           transcript,
         };
       }
 
       // Execute the action
-      const actionDesc = formatAction(result.action);
       transcript.push(`[${new Date().toISOString()}] Action: ${actionDesc}`);
       options.onAction?.(actionDesc, goalIndex);
       debug('Action: %s', actionDesc);
 
-      const execResult = await executeAction(browser, result.action, pageState.elements);
+      const execResult = await executeAction(browser, actionToExecute, pageState.elements);
 
       if (!execResult.success) {
         debug('Action failed: %s', execResult.error);

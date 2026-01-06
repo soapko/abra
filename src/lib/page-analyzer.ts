@@ -87,7 +87,15 @@ export const PAGE_ANALYZER_SCRIPT = `
     '[class*="clickable"]',
     '[class*="Clickable"]',
     '[class*="btn"]',
-    '[class*="Btn"]'
+    '[class*="Btn"]',
+    // Custom web components (shadow DOM search boxes)
+    'reddit-search-large',
+    'faceplate-search-input',
+    '[class*="search-bar"]',
+    '[class*="SearchBar"]',
+    '[class*="search-input"]',
+    '[class*="SearchInput"]',
+    'form[action*="search"]'
   ].join(', ');
 
   const seen = new Set();
@@ -252,6 +260,52 @@ export const PAGE_ANALYZER_SCRIPT = `
   };
 })()
 `;
+
+/**
+ * Find the element at given coordinates (for sight mode)
+ * Returns the smallest (most specific) element containing the point
+ */
+export function findElementAtCoordinates(
+  elements: PageElement[],
+  x: number,
+  y: number
+): PageElement | null {
+  // Find all elements whose bounding box contains the point
+  const hits = elements.filter(el =>
+    x >= el.bounds.x &&
+    x <= el.bounds.x + el.bounds.width &&
+    y >= el.bounds.y &&
+    y <= el.bounds.y + el.bounds.height &&
+    el.isVisible &&
+    el.isEnabled
+  );
+
+  if (hits.length === 0) {
+    // No exact hit - find nearest element
+    let nearest: PageElement | null = null;
+    let minDistance = Infinity;
+
+    for (const el of elements) {
+      if (!el.isVisible || !el.isEnabled) continue;
+
+      const centerX = el.bounds.x + el.bounds.width / 2;
+      const centerY = el.bounds.y + el.bounds.height / 2;
+      const distance = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearest = el;
+      }
+    }
+
+    return nearest;
+  }
+
+  // Return the smallest element (most specific)
+  return hits.sort((a, b) =>
+    (a.bounds.width * a.bounds.height) - (b.bounds.width * b.bounds.height)
+  )[0];
+}
 
 /**
  * Format page state for LLM consumption

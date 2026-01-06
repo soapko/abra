@@ -30,8 +30,9 @@ program
   .description('Run a persona simulation')
   .option('-o, --output <dir>', 'Output directory for session files', './sessions')
   .option('--headless', 'Run browser in headless mode')
+  .option('--sight-mode', 'Use screenshots for decision-making instead of HTML analysis')
   .option('--goals <indices>', 'Run only specific goals (comma-separated, 1-indexed)')
-  .action(async (personaFile: string, options: { output: string; headless?: boolean; goals?: string }) => {
+  .action(async (personaFile: string, options: { output: string; headless?: boolean; sightMode?: boolean; goals?: string }) => {
     const spinner = ora('Loading persona configuration...').start();
 
     try {
@@ -65,6 +66,11 @@ program
         process.exit(1);
       }
 
+      // Log sight mode if enabled
+      if (options.sightMode) {
+        console.log(chalk.cyan('Sight mode enabled - using screenshots for decision-making'));
+      }
+
       // Run session
       const sessionSpinner = ora('Running simulation...').start();
 
@@ -85,6 +91,7 @@ program
               wait: (ms: number) => browser.wait(ms),
               waitForLoaded: (timeout?: number) => browser.waitForLoaded(timeout),
               evaluate: (script: string) => browser.evaluate(script),
+              screenshot: () => browser.screenshot(),
             },
             goto: (url: string) => browser.goto(url),
             close: () => browser.close(),
@@ -95,6 +102,7 @@ program
         {
           outputDir: resolve(options.output),
           headless: options.headless,
+          sightMode: options.sightMode,
           onThought: (thought, goalIndex) => {
             sessionSpinner.text = `Goal ${goalIndex + 1}: ${thought.slice(0, 60)}...`;
           },

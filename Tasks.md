@@ -77,6 +77,14 @@
   - Verify speech bubble rendering
   - Verify goal completion detection
 
+## 006.features
+
+- [◒] **Task 12: Sight-based analysis mode** -> [006.features.01-sight-mode.md](docs/tasks/006.features.01-sight-mode.md)
+  - Add `--sight-mode` CLI flag
+  - Use screenshots for decision-making (vision LLM)
+  - Map visual coordinates back to HTML elements for actions
+  - Keep HTML selectors for reliable action execution
+
 ---
 
 ## Task Status Key

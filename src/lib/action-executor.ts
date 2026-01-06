@@ -17,6 +17,7 @@ export interface Browser {
   wait(ms: number): Promise<void>;
   waitForLoaded(timeout?: number): Promise<void>;
   evaluate(script: string): Promise<unknown>;
+  screenshot(): Promise<Buffer | string>;
 }
 
 export interface ExecutionResult {

@@ -1,0 +1,24 @@
+# Persona: Sloth Image Searcher
+# Test for sight-mode feature
+
+persona:
+  name: Sloth Fan
+  background: |
+    Someone who loves sloths and wants to find cute pictures of them.
+    Uses image search to find animal photos.
+
+  jobs_to_be_done:
+    - Find cute animal pictures
+    - Save interesting images for later
+
+url: https://duckduckgo.com
+
+goals:
+  - Search for "picture of a sloth" and view the image results
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 120000
+  thinkingSpeed: normal
