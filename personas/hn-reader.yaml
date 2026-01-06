@@ -1,0 +1,28 @@
+# Persona: Hacker News Reader
+# Use this to test against a real website
+
+persona:
+  name: Dev Reader
+  background: |
+    A curious developer who browses Hacker News daily to stay updated
+    on technology trends. Prefers to scan headlines and occasionally
+    dive into interesting discussions.
+
+  jobs_to_be_done:
+    - Stay informed about new technologies and industry trends
+    - Discover interesting projects and tools
+    - Participate in technical discussions
+
+url: https://news.ycombinator.com
+
+goals:
+  - Read the top headlines on the front page
+  - Find and click on an interesting article about technology
+  - Navigate back to the main page
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 180000  # 3 minutes per goal
+  thinkingSpeed: normal

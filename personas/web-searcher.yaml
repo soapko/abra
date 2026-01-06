@@ -1,0 +1,26 @@
+# Persona: Web Searcher
+# Tests clicking and typing actions
+
+persona:
+  name: Casey Search
+  background: |
+    A curious researcher who uses search engines to find information.
+    Prefers DuckDuckGo for privacy. Likes to explore search results.
+
+  jobs_to_be_done:
+    - Find reliable information quickly
+    - Explore different sources on topics of interest
+    - Stay informed about current events
+
+url: https://duckduckgo.com
+
+goals:
+  - Search for "automated testing tools" using the search box
+  - Click on one of the search results to learn more
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 120000
+  thinkingSpeed: normal

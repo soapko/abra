@@ -1,0 +1,24 @@
+# Persona: Web Searcher - Single Goal
+# Tests combined search and click in one session
+
+persona:
+  name: Casey Search
+  background: |
+    A curious researcher who uses search engines to find information.
+    Prefers DuckDuckGo for privacy. Likes to explore search results.
+
+  jobs_to_be_done:
+    - Find reliable information quickly
+    - Explore different sources on topics of interest
+
+url: https://duckduckgo.com
+
+goals:
+  - Search for "playwright browser testing" and then click on one of the search results
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 180000
+  thinkingSpeed: normal

@@ -1,0 +1,29 @@
+# Example Persona: Online Shopper
+# This is a sample persona configuration for testing
+
+persona:
+  name: Alex Thompson
+  background: |
+    35-year-old software engineer who prefers to shop online.
+    Values efficiency and clear pricing information.
+    Tends to compare products before making decisions.
+    First time visiting this particular website.
+
+  jobs_to_be_done:
+    - Find products that meet my specific requirements quickly
+    - Compare options to make informed purchasing decisions
+    - Complete transactions with minimal friction
+    - Feel confident I'm getting good value for my money
+
+url: https://example.com
+
+goals:
+  - Navigate to the main page and understand what this website offers
+  - Find the navigation or menu to explore available sections
+
+options:
+  viewport:
+    width: 1440
+    height: 900
+  timeout: 120000  # 2 minutes per goal
+  thinkingSpeed: normal

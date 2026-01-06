@@ -1,0 +1,17 @@
+{
+  "persona": "Dev Reader",
+  "startedAt": "2026-01-06T07:19:00.445Z",
+  "completedAt": "2026-01-06T07:19:16.795Z",
+  "goals": [
+    {
+      "description": "Read the top headlines on the front page",
+      "status": "completed",
+      "duration": 12444,
+      "actions": 0,
+      "transcript": [
+        "[2026-01-06T07:19:13.509Z] Thought: I'm on the Hacker News front page and I can already see all the top headlines displayed. Let me scan through them - there's stuff about Venezuela blackouts, Intel's new chips, a Korean mathematician solving a 60-year puzzle, JavaScript performance, and the Pebble watch coming back. This is exactly what I came here for."
+      ],
+      "video": "/Users/karl/Documents/_Projects/abra/sessions/dev-reader-1767683940444/videos/c596302e430357bfe0a0620461be33ff.webm"
+    }
+  ]
+}
