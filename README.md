@@ -22,9 +22,15 @@ Abra creates realistic user testing sessions by:
 ## Installation
 
 ```bash
-cd abra
 npm install
+npm run build
 ```
+
+## Requirements
+
+- Node.js 18+
+- [puppet](https://github.com/soapko/puppet) - Browser automation with human-like cursor movements (installed automatically)
+- Claude CLI (`claude`) - Authenticated and available in PATH
 
 ## Quick Start
 
@@ -49,20 +55,42 @@ url: https://example-store.com
 goals:
   - Find a laptop suitable for remote work under $1000
   - Add the laptop to cart and proceed to checkout
-  - Abandon checkout to test the recovery email flow
 ```
 
 2. Run the simulation:
 
 ```bash
-npx abra run personas/first-time-buyer.yaml
+node dist/cli.js run personas/first-time-buyer.yaml
 ```
 
-3. Watch the output videos in `./sessions/first-time-buyer/`
+3. Watch the output videos in `./sessions/`
 
-## Configuration
+## CLI Commands
 
-### Persona File Structure
+```bash
+# Run a persona simulation
+node dist/cli.js run <persona-file>
+
+# Run with sight mode (uses screenshots for smarter decisions)
+node dist/cli.js run personas/buyer.yaml --sight-mode
+
+# Run with specific goals only
+node dist/cli.js run personas/buyer.yaml --goals 1,3
+
+# Run in headless mode (no browser window)
+node dist/cli.js run personas/buyer.yaml --headless
+
+# Custom output directory
+node dist/cli.js run personas/buyer.yaml --output ./my-sessions
+
+# Validate a persona file without running
+node dist/cli.js validate personas/buyer.yaml
+
+# List recent sessions
+node dist/cli.js sessions
+```
+
+## Persona Configuration
 
 ```yaml
 persona:
@@ -83,52 +111,40 @@ options:                 # Optional settings
     width: 1440
     height: 900
   timeout: 300000        # Max time per goal (ms), default 5 minutes
-  thinkingSpeed: normal  # slow | normal | fast - affects pauses between actions
+  thinkingSpeed: fast    # slow | normal | fast - affects pauses between actions
 ```
 
-### Global Configuration
+### Thinking Speed
 
-Create `abra.config.yaml` in your project root:
-
-```yaml
-output:
-  dir: ./sessions        # Where to save session videos
-  format: mp4            # Video format
-
-llm:
-  provider: claude       # claude | local
-  localEndpoint: https://darkhorse.local:1234  # For structured responses
-
-browser:
-  headless: false        # Show browser during simulation
-  slowMo: 50             # Slow down actions for visibility
-```
+| Speed | Thinking Pause |
+|-------|----------------|
+| `fast` (default) | 500-1000ms |
+| `normal` | 1000-2000ms |
+| `slow` | 2000-4000ms |
 
 ## How It Works
 
-### Architecture
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Abra Orchestrator                        │
+│                         Abra Orchestrator                       │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
+│                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
 │  │   Persona    │───▶│    Page      │───▶│      LLM         │  │
 │  │   Config     │    │   Analyzer   │    │   (Claude CLI)   │  │
 │  └──────────────┘    └──────────────┘    └────────┬─────────┘  │
-│                                                    │             │
-│                                          ┌────────▼─────────┐   │
-│                                          │  Decision Engine │   │
-│                                          │  - Next action   │   │
-│                                          │  - Reasoning     │   │
-│                                          └────────┬─────────┘   │
-│                                                    │             │
-│  ┌──────────────┐    ┌──────────────┐    ┌────────▼─────────┐  │
+│                                                   │             │
+│                                         ┌─────────▼─────────┐   │
+│                                         │  Decision Engine  │   │
+│                                         │  - Next action    │   │
+│                                         │  - Reasoning      │   │
+│                                         └─────────┬─────────┘   │
+│                                                   │             │
+│  ┌──────────────┐    ┌──────────────┐    ┌───────▼──────────┐  │
 │  │   Video      │◀───│   Puppet     │◀───│  Action Executor │  │
 │  │   Output     │    │   Browser    │    │  + Speech Bubble │  │
 │  └──────────────┘    └──────────────┘    └──────────────────┘  │
-│                                                                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -138,30 +154,28 @@ browser:
 2. **Start Session** - Launch browser with video recording via puppet
 3. **Navigate to URL** - Go to the starting URL
 4. **For Each Goal**:
-   a. Inject speech bubble overlay into page
-   b. Analyze page - Extract all interactive elements
-   c. Send context to LLM (persona + JTBD + goal + page elements)
-   d. LLM returns: thought process + next action
-   e. Display thought in speech bubble near target element
-   f. Execute action via puppet (click, type, scroll, etc.)
-   g. Wait for page to settle
-   h. Repeat until goal achieved, failed, or timeout
-   i. Save video
+   - Inject speech bubble overlay into page
+   - Analyze page - Extract all interactive elements (including shadow DOM)
+   - Send context to LLM (persona + goal + page elements)
+   - LLM returns: thought process + next action
+   - Display thought in speech bubble near target element
+   - Execute action via puppet (click, type, scroll, press key, etc.)
+   - Wait for page to settle
+   - Repeat until goal achieved, failed, or timeout
+   - Save video
 5. **Generate Report** - Summary of goal outcomes
 
-### Speech Bubble
+### Sight Mode
 
-The speech bubble is a visual overlay injected into the page that:
+With `--sight-mode`, Abra uses annotated screenshots instead of HTML analysis:
 
-- Follows the cursor as it moves to elements
-- Displays the persona's "inner monologue"
-- Shows what they're thinking about each element
-- Animates naturally to feel like a real person exploring
+1. Captures screenshot of current page
+2. Overlays numbered labels on interactive elements
+3. Sends screenshot to Claude's vision API
+4. Claude visually identifies what to click based on appearance
+5. Maps visual selection back to HTML elements for reliable clicking
 
-Example thoughts:
-- "This looks like the search bar... let me try searching for laptops"
-- "Hmm, $1,299 is over my budget. Let me look for something cheaper"
-- "Add to Cart button - this is what I need to click"
+This is more robust for complex UIs with shadow DOM, dynamic content, or non-standard elements.
 
 ## Output
 
@@ -169,12 +183,12 @@ Example thoughts:
 
 ```
 sessions/
-└── first-time-buyer/
-    ├── goal-1-find-laptop.mp4
-    ├── goal-2-add-to-cart.mp4
-    ├── goal-3-abandon-checkout.mp4
-    ├── session.json           # Metadata and outcomes
-    └── transcript.md          # Full thought transcript
+└── sarah-chen-1704538200000/
+    ├── videos/
+    │   └── *.webm
+    ├── goal-1-find-laptop-transcript.md
+    ├── goal-2-add-to-cart-transcript.md
+    └── session.json
 ```
 
 ### Session Metadata
@@ -189,55 +203,18 @@ sessions/
       "description": "Find a laptop suitable for remote work under $1000",
       "status": "completed",
       "duration": 45000,
-      "video": "goal-1-find-laptop.mp4",
       "actions": 12
     },
     {
       "description": "Add the laptop to cart and proceed to checkout",
-      "status": "completed",
-      "duration": 23000,
-      "video": "goal-2-add-to-cart.mp4",
-      "actions": 5
-    },
-    {
-      "description": "Abandon checkout to test the recovery email flow",
       "status": "failed",
       "duration": 120000,
-      "video": "goal-3-abandon-checkout.mp4",
       "actions": 8,
-      "failureReason": "Could not locate checkout abandonment trigger"
+      "failureReason": "Could not locate add to cart button"
     }
   ]
 }
 ```
-
-## CLI Commands
-
-```bash
-# Run a persona simulation
-npx abra run <persona-file>
-
-# Run with specific goals only
-npx abra run personas/buyer.yaml --goals 1,3
-
-# Run in headless mode (no browser window)
-npx abra run personas/buyer.yaml --headless
-
-# Validate a persona file without running
-npx abra validate personas/buyer.yaml
-
-# List recent sessions
-npx abra sessions
-
-# Replay a session (re-watch video)
-npx abra replay sessions/first-time-buyer/goal-1-find-laptop.mp4
-```
-
-## Requirements
-
-- Node.js 18+
-- [puppet](../puppet) - Browser automation with human-like cursor movements
-- Claude CLI (`claude`) - Authenticated and available in PATH
 
 ## Development
 
@@ -245,11 +222,11 @@ npx abra replay sessions/first-time-buyer/goal-1-find-laptop.mp4
 # Install dependencies
 npm install
 
-# Run tests
-npm test
+# Build
+npm run build
 
 # Run with debug output
-DEBUG=abra:* npx abra run personas/example.yaml
+DEBUG=abra:* node dist/cli.js run personas/example.yaml
 ```
 
 ## License
