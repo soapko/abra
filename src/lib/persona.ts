@@ -12,7 +12,7 @@ const ViewportSchema = z.object({
 const OptionsSchema = z.object({
   viewport: ViewportSchema.default({ width: 1440, height: 900 }),
   timeout: z.number().default(300000), // 5 minutes default
-  thinkingSpeed: z.enum(['slow', 'normal', 'fast']).default('normal'),
+  thinkingSpeed: z.enum(['slow', 'normal', 'fast']).default('fast'),
 }).default({});
 
 // Main persona schema
