@@ -92,6 +92,106 @@ program
               waitForLoaded: (timeout?: number) => browser.waitForLoaded(timeout),
               evaluate: (script: string) => browser.evaluate(script),
               screenshot: () => browser.screenshot(),
+              // Press a key (uses Playwright keyboard API if available)
+              press: async (key: string) => {
+                // Try native press first, fallback to evaluate
+                if (browser.press) {
+                  await browser.press(key);
+                } else {
+                  await browser.evaluate(`
+                    (function() {
+                      const el = document.activeElement;
+                      if (el) {
+                        el.dispatchEvent(new KeyboardEvent('keydown', { key: '${key}', bubbles: true, cancelable: true }));
+                        el.dispatchEvent(new KeyboardEvent('keypress', { key: '${key}', bubbles: true, cancelable: true }));
+                        el.dispatchEvent(new KeyboardEvent('keyup', { key: '${key}', bubbles: true, cancelable: true }));
+                        // For Enter, also try form submission
+                        if ('${key}' === 'Enter' && el.form) {
+                          el.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                        }
+                      }
+                    })()
+                  `);
+                }
+              },
+              // Mouse for coordinate-based clicking (fallback when selectors fail)
+              mouse: {
+                click: async (x: number, y: number) => {
+                  // Use native pointer events with shadow DOM piercing
+                  const result = await browser.evaluate(`
+                    (function() {
+                      const x = ${x}, y = ${y};
+
+                      // Recursively find element at coordinates, piercing shadow DOM
+                      function deepElementFromPoint(x, y) {
+                        let el = document.elementFromPoint(x, y);
+                        if (!el) return null;
+
+                        // Keep piercing shadow roots until we find the deepest element
+                        let attempts = 0;
+                        while (el.shadowRoot && attempts < 10) {
+                          const inner = el.shadowRoot.elementFromPoint(x, y);
+                          if (!inner || inner === el) break;
+                          el = inner;
+                          attempts++;
+                        }
+                        return el;
+                      }
+
+                      // Find the deepest element (piercing shadow DOM)
+                      const el = deepElementFromPoint(x, y);
+                      if (!el) return { success: false, reason: 'no element' };
+
+                      // For links, get the href and navigate directly
+                      const link = el.closest('a[href]');
+                      if (link && link.href && !link.href.startsWith('javascript:')) {
+                        // Navigate directly to the link target
+                        window.location.href = link.href;
+                        return { success: true, navigated: link.href };
+                      }
+
+                      // For buttons and other clickable elements, try multiple approaches
+                      const target = el;
+
+                      // Dispatch pointer/mouse events
+                      const eventInit = {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y,
+                        screenX: x,
+                        screenY: y,
+                        button: 0,
+                        buttons: 1
+                      };
+
+                      // Focus the element first
+                      if (typeof target.focus === 'function') {
+                        target.focus();
+                      }
+
+                      // Fire complete event sequence
+                      target.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+                      target.dispatchEvent(new MouseEvent('mousedown', eventInit));
+                      target.dispatchEvent(new PointerEvent('pointerup', eventInit));
+                      target.dispatchEvent(new MouseEvent('mouseup', eventInit));
+                      target.dispatchEvent(new MouseEvent('click', eventInit));
+
+                      // Also try direct click on the element
+                      if (typeof target.click === 'function') {
+                        target.click();
+                      }
+
+                      return { success: true, clicked: target.tagName };
+                    })()
+                  `);
+                  // Log the result for debugging
+                  if (result && typeof result === 'object') {
+                    console.error('[abra:mouse] Coordinate click result:', JSON.stringify(result));
+                  }
+                },
+              },
             },
             goto: (url: string) => browser.goto(url),
             close: () => browser.close(),

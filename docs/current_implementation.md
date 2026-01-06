@@ -54,6 +54,12 @@ src/
 - Saves transcripts and session metadata
 - Handles timeouts and action limits
 
+### Shadow DOM Click Support
+- `deepElementFromPoint(x, y)` pierces shadow DOM to find actual element
+- For links inside shadow DOM, extracts href and navigates directly
+- Falls back to event dispatch for non-link elements
+- Works with Reddit search suggestions and other shadow DOM components
+
 ## CLI Commands
 
 - `abra run <persona.yaml>` - Run simulation

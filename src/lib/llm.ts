@@ -19,7 +19,7 @@ const CLAUDE_PATHS = [
 ].filter(Boolean) as string[];
 
 // Action types the LLM can request
-export type ActionType = 'click' | 'type' | 'scroll' | 'hover' | 'wait' | 'done' | 'failed';
+export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'wait' | 'done' | 'failed';
 
 export interface Action {
   type: ActionType;
@@ -29,6 +29,8 @@ export interface Action {
   selector?: string;
   // Text to type (for type action)
   text?: string;
+  // Key to press (for press action): Enter, Escape, Tab, ArrowDown, ArrowUp, etc.
+  key?: string;
   // Scroll direction (for scroll action)
   direction?: 'up' | 'down';
   // Scroll amount in pixels
@@ -266,9 +268,10 @@ Your response MUST be valid JSON with this exact structure:
 {
   "thought": "Your internal monologue as this persona (1-2 sentences, first person)",
   "action": {
-    "type": "click|type|scroll|hover|wait|done|failed",
+    "type": "click|type|press|scroll|hover|wait|done|failed",
     "elementId": <the number from the red label, e.g. 5 for [5]>,
     "text": "<text to type if type action>",
+    "key": "<key to press: Enter, Escape, Tab, ArrowDown, ArrowUp>",
     "direction": "up|down (if scroll)",
     "amount": <pixels to scroll>,
     "duration": <ms to wait>,
@@ -278,8 +281,10 @@ Your response MUST be valid JSON with this exact structure:
 }
 
 Rules:
-- ALWAYS use elementId to reference elements by their [number] label in the screenshot
+- CRITICAL: Look at the RED numbered labels [0], [1], [2] etc in the screenshot and use the EXACT number for the element you want to interact with
+- The Element Legend below tells you what each [number] refers to - use it to verify you're selecting the right element
 - Look at the visual context to understand the page layout and purpose
+- IMPORTANT: After typing in a search box, ALWAYS press Enter to submit. Do NOT try to click dropdown suggestions - they are inside shadow DOM and clicking them will fail
 - Use "done" when you believe the goal has been achieved
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
@@ -538,6 +543,8 @@ export function formatVisionAction(action: VisionAction): string {
       return `[sight] Clicked${elemRef}`;
     case 'type':
       return `[sight] Typed "${action.text}" into${elemRef}`;
+    case 'press':
+      return `[sight] Pressed ${action.key}`;
     case 'scroll':
       return `[sight] Scrolled ${action.direction} ${action.amount}px`;
     case 'hover':

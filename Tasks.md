@@ -85,6 +85,21 @@
   - Map visual coordinates back to HTML elements for actions
   - Keep HTML selectors for reliable action execution
 
+## 007.bugfix
+
+- [✅] **Task 13: Unique selector generation** -> [007.bugfix.01-unique-selectors.md](docs/tasks/007.bugfix.01-unique-selectors.md)
+  - Check selector uniqueness before returning
+  - Combine attributes for unique selectors
+  - Coordinate fallback when selectors fail
+
+## 008.bugfix
+
+- [✅] **Task 14: Shadow DOM element clicking** -> [008.bugfix.shadow-dom-clicking.md](docs/tasks/008.bugfix.shadow-dom-clicking.md)
+  - Elements inside shadow DOM (dropdowns, popovers) can't be clicked
+  - Playwright reports "covered by" shadow host
+  - `document.elementFromPoint()` returns shadow host, not inner element
+  - **Fixed**: Added `deepElementFromPoint()` to pierce shadow DOM and direct href navigation for links
+
 ---
 
 ## Task Status Key

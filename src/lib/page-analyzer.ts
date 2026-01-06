@@ -34,6 +34,8 @@ export interface PageElement {
   isVisible: boolean;
   // Whether element is enabled/not disabled
   isEnabled: boolean;
+  // Whether element is inside a shadow DOM
+  inShadowDom?: boolean;
 }
 
 export interface PageState {
@@ -95,15 +97,48 @@ export const PAGE_ANALYZER_SCRIPT = `
     '[class*="SearchBar"]',
     '[class*="search-input"]',
     '[class*="SearchInput"]',
-    'form[action*="search"]'
+    'form[action*="search"]',
+    // Dropdown/autocomplete suggestions
+    '[class*="suggestion"]',
+    '[class*="Suggestion"]',
+    '[class*="autocomplete"]',
+    '[class*="Autocomplete"]',
+    '[class*="dropdown"] li',
+    '[class*="Dropdown"] li',
+    '[class*="menu-item"]',
+    '[class*="MenuItem"]',
+    '[class*="typeahead"]',
+    '[class*="Typeahead"]',
+    // Reddit-specific search suggestions
+    'faceplate-tracker[noun="search_suggest"]',
+    '[data-testid*="search"]',
+    '[data-testid*="subreddit"]',
+    'li[role="presentation"]',
+    'ul[role="listbox"] > li'
   ].join(', ');
 
   const seen = new Set();
   const result = [];
   let idCounter = 0;
 
-  // Get all matching elements
+  // Get all matching elements from regular DOM
   const elements = document.querySelectorAll(interactiveSelectors);
+
+  // Also search inside shadow roots for ALL interactive elements
+  const shadowHosts = document.querySelectorAll('*');
+  const shadowElements = [];
+  shadowHosts.forEach(host => {
+    if (host.shadowRoot) {
+      // Search for all interactive elements inside shadow DOM
+      const shadowInteractive = host.shadowRoot.querySelectorAll(
+        'a[href], button, input, select, textarea, ' +
+        '[role="button"], [role="link"], [role="menuitem"], [role="option"], [role="listbox"], ' +
+        '[onclick], [data-testid], [tabindex]:not([tabindex="-1"]), ' +
+        'li, [class*="suggestion"], [class*="result"], [class*="item"]'
+      );
+      shadowInteractive.forEach(el => shadowElements.push(el));
+    }
+  });
 
   // Helper to check if element is truly visible
   const isElementVisible = (el) => {
@@ -125,58 +160,124 @@ export const PAGE_ANALYZER_SCRIPT = `
     return true;
   };
 
+  // Helper to check if selector is unique
+  const isUnique = (selector) => {
+    try {
+      return document.querySelectorAll(selector).length === 1;
+    } catch {
+      return false;
+    }
+  };
+
+  // Helper to escape attribute values for selectors
+  const escapeAttr = (val) => val.replace(/"/g, '\\\\"').replace(/\\n/g, ' ');
+
   // Helper to get unique selector
   const getSelector = (el) => {
+    const tag = el.tagName.toLowerCase();
     const testId = el.getAttribute('data-testid');
-    if (testId) return testId;
-
     const id = el.id;
-    if (id && !id.match(/^[a-f0-9-]{20,}$/i) && !id.match(/^\\d+$/)) {
-      return '#' + CSS.escape(id);
-    }
-
     const name = el.getAttribute('name');
-    if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
-
     const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel && ariaLabel.length < 50) {
-      return '[aria-label="' + ariaLabel.replace(/"/g, '\\\\"') + '"]';
+    const href = el.getAttribute('href');
+
+    // Try ID first (usually unique)
+    if (id && !id.match(/^[a-f0-9-]{20,}$/i) && !id.match(/^\\d+$/)) {
+      const sel = '#' + CSS.escape(id);
+      if (isUnique(sel)) return sel;
     }
 
-    // For links, use href if it's a clean URL
-    if (el.tagName === 'A' && el.href) {
-      const href = el.getAttribute('href');
-      if (href && !href.startsWith('javascript:') && href.length < 100) {
-        return 'a[href="' + href.replace(/"/g, '\\\\"') + '"]';
+    // Try data-testid alone
+    if (testId) {
+      const sel = '[data-testid="' + escapeAttr(testId) + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Try name alone
+    if (name) {
+      const sel = '[name="' + escapeAttr(name) + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Try aria-label alone
+    if (ariaLabel && ariaLabel.length < 50) {
+      const sel = '[aria-label="' + escapeAttr(ariaLabel) + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Try href alone for links
+    if (tag === 'a' && href && !href.startsWith('javascript:') && href.length < 150) {
+      const sel = 'a[href="' + escapeAttr(href) + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Combine testid + href for links (common Reddit pattern)
+    if (testId && href && tag === 'a') {
+      const sel = 'a[data-testid="' + escapeAttr(testId) + '"][href="' + escapeAttr(href) + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Combine testid + text content
+    if (testId) {
+      const text = (el.textContent || '').trim().slice(0, 30);
+      if (text) {
+        // Use :has() or text matching via aria-label if available
+        const sel = '[data-testid="' + escapeAttr(testId) + '"][aria-label*="' + escapeAttr(text.slice(0, 20)) + '"]';
+        if (isUnique(sel)) return sel;
       }
     }
 
-    // Generate nth-of-type selector
-    const tag = el.tagName.toLowerCase();
+    // Try tag + role + partial text match
+    const role = el.getAttribute('role');
+    if (role) {
+      const sel = tag + '[role="' + role + '"]';
+      if (isUnique(sel)) return sel;
+    }
+
+    // Generate nth-of-type selector based on parent
     const parent = el.parentElement;
     if (parent) {
       const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
       const index = siblings.indexOf(el) + 1;
       if (siblings.length > 1) {
-        const parentSelector = parent.id ? '#' + CSS.escape(parent.id) : parent.tagName.toLowerCase();
-        return parentSelector + ' > ' + tag + ':nth-of-type(' + index + ')';
+        // Try parent ID + nth-of-type
+        if (parent.id) {
+          const sel = '#' + CSS.escape(parent.id) + ' > ' + tag + ':nth-of-type(' + index + ')';
+          if (isUnique(sel)) return sel;
+        }
+
+        // Try parent testid + nth-of-type
+        const parentTestId = parent.getAttribute('data-testid');
+        if (parentTestId) {
+          const sel = '[data-testid="' + escapeAttr(parentTestId) + '"] > ' + tag + ':nth-of-type(' + index + ')';
+          if (isUnique(sel)) return sel;
+        }
       }
     }
 
-    // Fallback to tag with classes
+    // Fallback: tag + classes (may not be unique, but better than nothing)
     let selector = tag;
     if (el.className && typeof el.className === 'string') {
       const classes = el.className.split(' ')
-        .filter(c => c && c.length > 2 && !c.match(/^[a-z]{1,3}-[a-f0-9]+$/i))
+        .filter(c => c && c.length > 2 && c.length < 30 && !c.match(/^[a-z]{1,3}-[a-f0-9]+$/i))
         .slice(0, 2);
       if (classes.length) {
         selector += '.' + classes.map(c => CSS.escape(c)).join('.');
       }
     }
+
+    // Add testid even if not unique - action executor will fallback to coordinates
+    if (testId) {
+      selector = '[data-testid="' + escapeAttr(testId) + '"]';
+    }
+
     return selector;
   };
 
-  elements.forEach((el) => {
+  // Combine regular elements and shadow DOM elements
+  const allElements = [...elements, ...shadowElements];
+
+  allElements.forEach((el) => {
     if (!isElementVisible(el)) return;
 
     const rect = el.getBoundingClientRect();
@@ -186,6 +287,9 @@ export const PAGE_ANALYZER_SCRIPT = `
     const key = tag + ':' + Math.round(rect.x) + ':' + Math.round(rect.y);
     if (seen.has(key)) return;
     seen.add(key);
+
+    // For shadow DOM elements, we need a special selector strategy
+    const inShadow = el.getRootNode() !== document;
 
     const testId = el.getAttribute('data-testid');
     const ariaLabel = el.getAttribute('aria-label');
@@ -219,7 +323,26 @@ export const PAGE_ANALYZER_SCRIPT = `
     // Clean up text
     text = text.replace(/\\s+/g, ' ').trim().slice(0, 100);
 
-    const selector = getSelector(el);
+    // For shadow DOM elements, selectors won't work - mark for coordinate click
+    let selector = '';
+    if (inShadow) {
+      // Find the shadow host element
+      const shadowRoot = el.getRootNode();
+      const host = shadowRoot.host;
+      if (host) {
+        const hostTag = host.tagName.toLowerCase();
+        const hostTestId = host.getAttribute('data-testid');
+        if (hostTestId) {
+          selector = '[data-testid="' + escapeAttr(hostTestId) + '"] >>> ' + tag;
+        } else {
+          selector = hostTag + ' >>> ' + tag;
+        }
+      } else {
+        selector = '__SHADOW_DOM__:' + tag;  // Mark as needing coordinate click
+      }
+    } else {
+      selector = getSelector(el);
+    }
 
     result.push({
       id: idCounter++,
@@ -239,7 +362,8 @@ export const PAGE_ANALYZER_SCRIPT = `
         height: Math.round(rect.height)
       },
       isVisible: true,
-      isEnabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true'
+      isEnabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
+      inShadowDom: inShadow || undefined
     });
   });
 

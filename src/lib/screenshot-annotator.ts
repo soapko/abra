@@ -174,8 +174,45 @@ export function formatElementLegend(elements: PageElement[]): string {
       parts.push(`{${el.testId}}`);
     }
 
+    // Add position context to help LLM identify elements
+    const posDesc = getPositionDescription(el.bounds);
+    if (posDesc) {
+      parts.push(`@${posDesc}`);
+    }
+
     lines.push('  ' + parts.join(' '));
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Get a human-readable position description for an element
+ */
+function getPositionDescription(bounds: { x: number; y: number; width: number; height: number }): string {
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+
+  // Assume standard viewport - adjust if needed
+  const viewWidth = 1280;
+  const viewHeight = 720;
+
+  let horizontal = '';
+  if (centerX < viewWidth * 0.33) horizontal = 'left';
+  else if (centerX > viewWidth * 0.67) horizontal = 'right';
+  else horizontal = 'center';
+
+  let vertical = '';
+  if (centerY < 100) vertical = 'top';
+  else if (centerY < 300) vertical = 'upper';
+  else if (centerY > viewHeight - 100) vertical = 'bottom';
+
+  if (vertical && horizontal) {
+    return `${vertical}-${horizontal}`;
+  } else if (vertical) {
+    return vertical;
+  } else if (horizontal !== 'center') {
+    return horizontal;
+  }
+  return '';
 }

@@ -18,6 +18,12 @@ export interface Browser {
   waitForLoaded(timeout?: number): Promise<void>;
   evaluate(script: string): Promise<unknown>;
   screenshot(): Promise<Buffer | string>;
+  // Press a key (Enter, Escape, Tab, etc.)
+  press?(key: string): Promise<void>;
+  // Optional coordinate-based click for fallback
+  mouse?: {
+    click(x: number, y: number): Promise<void>;
+  };
 }
 
 export interface ExecutionResult {
@@ -31,6 +37,55 @@ export interface ExecutionResult {
  */
 function findElement(elements: PageElement[], elementId: number): PageElement | undefined {
   return elements.find(el => el.id === elementId);
+}
+
+/**
+ * Check if error is recoverable via coordinate click
+ */
+function isRecoverableClickError(errorMsg: string): boolean {
+  return (
+    errorMsg.includes('strict mode violation') ||  // Multiple elements match selector
+    errorMsg.includes('is covered by') ||          // Element obscured by overlay
+    errorMsg.includes('intercept') ||              // Click intercepted by another element
+    errorMsg.includes('not visible') ||            // Element not visible
+    errorMsg.includes('outside of the viewport') ||// Element scrolled out of view
+    errorMsg.includes('Timeout') ||                // Selector timeout (shadow DOM)
+    errorMsg.includes('>>>') ||                    // Shadow DOM selector (not supported by Playwright)
+    errorMsg.includes('__SHADOW_DOM__')            // Our shadow DOM marker
+  );
+}
+
+/**
+ * Try clicking with selector, fallback to coordinates if selector fails
+ */
+async function tryClickWithFallback(
+  browser: Browser,
+  selector: string,
+  element: PageElement | null | undefined
+): Promise<void> {
+  try {
+    await browser.click(selector);
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    debug('Click with selector failed: %s', errorMsg.slice(0, 150));
+
+    // Check if we can recover by clicking at coordinates
+    const canRecover = isRecoverableClickError(errorMsg);
+    const hasBounds = !!element?.bounds;
+    const hasMouse = !!browser.mouse;
+
+    debug('Recovery check: canRecover=%s, hasBounds=%s, hasMouse=%s', canRecover, hasBounds, hasMouse);
+
+    if (canRecover && hasBounds && browser.mouse) {
+      const center = getElementCenter(element!);
+      debug('Falling back to coordinate click at (%d, %d)', center.x, center.y);
+      await browser.mouse.click(center.x, center.y);
+      debug('Coordinate click completed');
+    } else {
+      debug('Cannot recover, rethrowing error');
+      throw err;
+    }
+  }
 }
 
 /**
@@ -52,11 +107,18 @@ export async function executeAction(
 
         const selector = element?.selector || action.selector;
         if (!selector) {
+          // No selector - try coordinate click if we have bounds
+          if (element?.bounds && browser.mouse) {
+            const center = getElementCenter(element);
+            debug('No selector, clicking at coordinates (%d, %d)', center.x, center.y);
+            await browser.mouse.click(center.x, center.y);
+            break;
+          }
           throw new Error('No selector for click action');
         }
 
         debug('Clicking:', selector);
-        await browser.click(selector);
+        await tryClickWithFallback(browser, selector, element);
         break;
       }
 
@@ -74,8 +136,43 @@ export async function executeAction(
         }
 
         debug('Typing "%s" into:', action.text, selector);
-        await browser.click(selector); // Focus first
-        await browser.type(selector, action.text);
+
+        // Check if this is a shadow DOM element (selector contains >>> or __SHADOW_DOM__)
+        const isShadowElement = selector.includes('>>>') || selector.includes('__SHADOW_DOM__');
+
+        if (isShadowElement && element?.bounds && browser.mouse) {
+          // For shadow DOM: click at coordinates, then type via keyboard events
+          const center = getElementCenter(element);
+          debug('Shadow DOM element - clicking at (%d, %d) then typing via keyboard', center.x, center.y);
+          await browser.mouse.click(center.x, center.y);
+          await browser.wait(100); // Small delay for focus
+
+          // Type using keyboard events - escape the text for JavaScript
+          const escapedText = JSON.stringify(action.text);
+          await browser.evaluate(`
+            (function() {
+              const text = ${escapedText};
+              const el = document.activeElement;
+              if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+                // Clear existing value
+                if (el.value !== undefined) el.value = '';
+                // Set new value
+                if (el.value !== undefined) {
+                  el.value = text;
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                  el.textContent = text;
+                  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+                }
+              }
+            })()
+          `);
+        } else {
+          // Regular element: focus first with fallback, then type
+          await tryClickWithFallback(browser, selector, element);
+          await browser.type(selector, action.text);
+        }
         break;
       }
 
@@ -100,6 +197,21 @@ export async function executeAction(
 
         debug('Scrolling %s %dpx', direction, amount);
         await browser.scroll(direction, amount);
+        break;
+      }
+
+      case 'press': {
+        const key = action.key || 'Enter';
+        debug('Pressing key: %s', key);
+        if (browser.press) {
+          await browser.press(key);
+        } else {
+          // Fallback: use evaluate to dispatch key event
+          await browser.evaluate(`
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: '${key}', bubbles: true }));
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', { key: '${key}', bubbles: true }));
+          `);
+        }
         break;
       }
 
