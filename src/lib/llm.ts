@@ -19,7 +19,10 @@ const CLAUDE_PATHS = [
 ].filter(Boolean) as string[];
 
 // Action types the LLM can request
-export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'wait' | 'done' | 'failed';
+export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'wait' | 'done' | 'failed' | 'document';
+
+// Document operations for the document action type
+export type DocumentOperation = 'create' | 'read' | 'update' | 'append';
 
 export interface Action {
   type: ActionType;
@@ -39,6 +42,13 @@ export interface Action {
   duration?: number;
   // Reason for done/failed
   reason?: string;
+  // Document action configuration
+  document?: {
+    operation: DocumentOperation;
+    filename: string;
+    content?: string;
+    section?: string;  // For update - target heading or JSON path
+  };
 }
 
 export interface ThinkingResult {
@@ -84,6 +94,25 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
+DOCUMENT ACTIONS:
+You can create and maintain documents to record your findings, notes, and journey.
+Use the "document" action type with these operations:
+
+- create: Start a new document
+  {"type": "document", "document": {"operation": "create", "filename": "notes.md", "content": "# Notes\\n..."}}
+
+- read: Read existing document (content will be available in next step)
+  {"type": "document", "document": {"operation": "read", "filename": "notes.md"}}
+
+- update: Replace content (optionally target a section by heading)
+  {"type": "document", "document": {"operation": "update", "filename": "notes.md", "content": "...", "section": "## Findings"}}
+
+- append: Add to end of document
+  {"type": "document", "document": {"operation": "append", "filename": "notes.md", "content": "\\n## New Section\\n..."}}
+
+Formats: .md (Markdown), .json (JSON), .txt (plain text), or any custom extension.
+Document when your goal mentions: document, record, note, track, log, compare, write down.
+
 Rules:
 - Use "done" when you believe the goal has been achieved
 - Use "failed" if you cannot find a way to achieve the goal
@@ -95,17 +124,45 @@ Rules:
 /**
  * Build the user prompt for a specific step
  */
-function buildUserPrompt(goal: string, pageState: PageState, previousActions: string[]): string {
+function buildUserPrompt(
+  goal: string,
+  pageState: PageState,
+  previousActions: string[],
+  documentIndex?: string,
+  lastReadContent?: string | null,
+  lastActionFeedback?: string | null
+): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
     '',
     formatPageStateForLLM(pageState),
   ];
 
+  // Add available documents
+  if (documentIndex) {
+    parts.push('');
+    parts.push('AVAILABLE DOCUMENTS:');
+    parts.push(documentIndex);
+  }
+
+  // Add last read document content if available
+  if (lastReadContent) {
+    parts.push('');
+    parts.push('LAST READ DOCUMENT CONTENT:');
+    parts.push(lastReadContent.slice(0, 2000)); // Limit to prevent prompt bloat
+  }
+
   if (previousActions.length > 0) {
     parts.push('');
     parts.push('PREVIOUS ACTIONS:');
     parts.push(previousActions.slice(-5).join('\n')); // Last 5 actions
+  }
+
+  // Add feedback about the last action's result
+  if (lastActionFeedback) {
+    parts.push('');
+    parts.push('RESULT OF LAST ACTION:');
+    parts.push(lastActionFeedback);
   }
 
   parts.push('');
@@ -137,25 +194,44 @@ async function findClaudeCLI(): Promise<string> {
 // Cached Claude CLI path
 let claudePath: string | null = null;
 
+// Track which sessions have been created (first call uses --session-id, subsequent use --resume)
+const createdSessions = new Set<string>();
+
 /**
  * Invoke Claude CLI and get a response
  */
-async function invokeClaudeCLI(systemPrompt: string, userPrompt: string): Promise<string> {
+async function invokeClaudeCLI(
+  systemPrompt: string,
+  userPrompt: string,
+  sessionId?: string
+): Promise<string> {
   // Find Claude CLI path if not cached
   if (!claudePath) {
     claudePath = await findClaudeCLI();
   }
 
   return new Promise((resolve, reject) => {
-    debug('Invoking Claude CLI at:', claudePath);
+    const isNewSession = sessionId && !createdSessions.has(sessionId);
+    debug('Invoking Claude CLI at:', claudePath, sessionId ? `(session: ${sessionId.slice(0, 8)}..., new: ${isNewSession})` : '(no session)');
 
     // Combine into a single prompt for simplicity
     const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
 
-    const proc = spawn(claudePath!, [
-      '--print',  // Print response only, non-interactive
-      '--no-session-persistence', // Don't save session
-    ], {
+    const args = ['--print'];
+    if (sessionId) {
+      if (isNewSession) {
+        // First call for this session - create it
+        args.push('--session-id', sessionId);
+        createdSessions.add(sessionId);
+      } else {
+        // Subsequent calls - resume the existing session
+        args.push('--resume', sessionId);
+      }
+    } else {
+      args.push('--no-session-persistence');
+    }
+
+    const proc = spawn(claudePath!, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
     });
@@ -233,15 +309,19 @@ export async function getNextAction(
   persona: PersonaConfig,
   goal: string,
   pageState: PageState,
-  previousActions: string[] = []
+  previousActions: string[] = [],
+  documentIndex?: string,
+  lastReadContent?: string | null,
+  sessionId?: string,
+  lastActionFeedback?: string | null
 ): Promise<ThinkingResult> {
   const systemPrompt = buildSystemPrompt(persona);
-  const userPrompt = buildUserPrompt(goal, pageState, previousActions);
+  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback);
 
   debug('Getting next action for goal:', goal);
   debug('Page has %d elements', pageState.elements.length);
 
-  const response = await invokeClaudeCLI(systemPrompt, userPrompt);
+  const response = await invokeClaudeCLI(systemPrompt, userPrompt, sessionId);
   debug('Raw response:', response.slice(0, 200) + '...');
 
   return parseResponse(response);
@@ -280,6 +360,25 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
+DOCUMENT ACTIONS:
+You can create and maintain documents to record your findings, notes, and journey.
+Use the "document" action type with these operations:
+
+- create: Start a new document
+  {"type": "document", "document": {"operation": "create", "filename": "notes.md", "content": "# Notes\\n..."}}
+
+- read: Read existing document (content will be available in next step)
+  {"type": "document", "document": {"operation": "read", "filename": "notes.md"}}
+
+- update: Replace content (optionally target a section by heading)
+  {"type": "document", "document": {"operation": "update", "filename": "notes.md", "content": "...", "section": "## Findings"}}
+
+- append: Add to end of document
+  {"type": "document", "document": {"operation": "append", "filename": "notes.md", "content": "\\n## New Section\\n..."}}
+
+Formats: .md (Markdown), .json (JSON), .txt (plain text), or any custom extension.
+Document when your goal mentions: document, record, note, track, log, compare, write down.
+
 Rules:
 - CRITICAL: Look at the RED numbered labels [0], [1], [2] etc in the screenshot and use the EXACT number for the element you want to interact with
 - The Element Legend below tells you what each [number] refers to - use it to verify you're selecting the right element
@@ -294,7 +393,14 @@ Rules:
 /**
  * Build the vision user prompt with screenshot
  */
-function buildVisionUserPrompt(goal: string, elementLegend: string, previousActions: string[]): string {
+function buildVisionUserPrompt(
+  goal: string,
+  elementLegend: string,
+  previousActions: string[],
+  documentIndex?: string,
+  lastReadContent?: string | null,
+  lastActionFeedback?: string | null
+): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
     '',
@@ -303,10 +409,31 @@ function buildVisionUserPrompt(goal: string, elementLegend: string, previousActi
     elementLegend,
   ];
 
+  // Add available documents
+  if (documentIndex) {
+    parts.push('');
+    parts.push('AVAILABLE DOCUMENTS:');
+    parts.push(documentIndex);
+  }
+
+  // Add last read document content if available
+  if (lastReadContent) {
+    parts.push('');
+    parts.push('LAST READ DOCUMENT CONTENT:');
+    parts.push(lastReadContent.slice(0, 2000)); // Limit to prevent prompt bloat
+  }
+
   if (previousActions.length > 0) {
     parts.push('');
     parts.push('PREVIOUS ACTIONS:');
     parts.push(previousActions.slice(-5).join('\n')); // Last 5 actions
+  }
+
+  // Add feedback about the last action's result
+  if (lastActionFeedback) {
+    parts.push('');
+    parts.push('RESULT OF LAST ACTION:');
+    parts.push(lastActionFeedback);
   }
 
   parts.push('');
@@ -430,22 +557,32 @@ async function cleanupScreenshot(filepath: string): Promise<void> {
 async function invokeClaudeCLIWithVision(
   systemPrompt: string,
   userPrompt: string,
-  screenshotPath: string
+  screenshotPath: string,
+  sessionId?: string
 ): Promise<string> {
   if (!claudePath) {
     claudePath = await findClaudeCLI();
   }
 
   return new Promise((resolve, reject) => {
-    debug('Invoking Claude CLI with vision, screenshot:', screenshotPath);
+    const isNewSession = sessionId && !createdSessions.has(sessionId);
+    debug('Invoking Claude CLI with vision, screenshot:', screenshotPath, sessionId ? `(session: ${sessionId.slice(0, 8)}..., new: ${isNewSession})` : '');
 
     const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}\n\nLook at the screenshot at: ${screenshotPath}`;
 
-    const proc = spawn(claudePath!, [
-      '--print',
-      '--no-session-persistence',
-      '--dangerously-skip-permissions', // Required to read temp files
-    ], {
+    const args = ['--print', '--dangerously-skip-permissions'];
+    if (sessionId) {
+      if (isNewSession) {
+        args.push('--session-id', sessionId);
+        createdSessions.add(sessionId);
+      } else {
+        args.push('--resume', sessionId);
+      }
+    } else {
+      args.push('--no-session-persistence');
+    }
+
+    const proc = spawn(claudePath!, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
     });
@@ -488,10 +625,14 @@ export async function getNextActionFromScreenshot(
   goal: string,
   screenshot: Buffer | string,
   elementLegend: string,
-  previousActions: string[] = []
+  previousActions: string[] = [],
+  documentIndex?: string,
+  lastReadContent?: string | null,
+  sessionId?: string,
+  lastActionFeedback?: string | null
 ): Promise<VisionThinkingResult> {
   const systemPrompt = buildVisionSystemPrompt(persona);
-  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions);
+  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback);
 
   debug('Getting next action from screenshot for goal:', goal);
 
@@ -499,7 +640,7 @@ export async function getNextActionFromScreenshot(
   const screenshotPath = await saveScreenshotToTemp(screenshot);
 
   try {
-    const response = await invokeClaudeCLIWithVision(systemPrompt, userPrompt, screenshotPath);
+    const response = await invokeClaudeCLIWithVision(systemPrompt, userPrompt, screenshotPath, sessionId);
     debug('Vision response:', response.slice(0, 200) + '...');
     return parseVisionResponse(response);
   } finally {
@@ -523,6 +664,8 @@ export function formatAction(action: Action): string {
       return `Hovered over element ${action.elementId}`;
     case 'wait':
       return `Waited ${action.duration}ms`;
+    case 'document':
+      return `Document ${action.document?.operation}: ${action.document?.filename}`;
     case 'done':
       return `Goal completed: ${action.reason}`;
     case 'failed':
@@ -551,6 +694,8 @@ export function formatVisionAction(action: VisionAction): string {
       return `[sight] Hovered over${elemRef}`;
     case 'wait':
       return `[sight] Waited ${action.duration}ms`;
+    case 'document':
+      return `[sight] Document ${action.document?.operation}: ${action.document?.filename}`;
     case 'done':
       return `[sight] Goal completed: ${action.reason}`;
     case 'failed':

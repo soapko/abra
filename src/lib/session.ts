@@ -4,6 +4,7 @@
 
 import { mkdir, writeFile } from 'fs/promises';
 import { join, dirname } from 'path';
+import { randomUUID } from 'crypto';
 import createDebug from 'debug';
 import type { PersonaConfig } from './persona.js';
 import { getThinkingDelay } from './persona.js';
@@ -95,7 +96,14 @@ async function runGoal(
   const thinkingDelay = getThinkingDelay(persona.options.thinkingSpeed);
   const sightMode = options.sightMode ?? false;
 
-  debug('Starting goal %d: %s (sightMode: %s)', goalIndex + 1, goal, sightMode);
+  // Generate a unique session ID for this goal's LLM conversation
+  // This allows the LLM to maintain context across iterations
+  const llmSessionId = randomUUID();
+
+  // Track feedback about the last action's result
+  let lastActionFeedback: string | null = null;
+
+  debug('Starting goal %d: %s (sightMode: %s, session: %s)', goalIndex + 1, goal, sightMode, llmSessionId.slice(0, 8));
 
   // Initialize speech bubble
   await browser.evaluate(getInitScript(persona.persona.name));
@@ -103,15 +111,15 @@ async function runGoal(
   try {
     // Main simulation loop
     while (Date.now() - startTime < timeout) {
-      // Wait for page to stabilize before analyzing
-      try {
-        await browser.waitForLoaded(5000);
-      } catch {
-        // Ignore timeout - proceed with analysis anyway
+      // Note: waitForLoaded is called after each action, so we skip it here
+      // except for the first iteration (before any action has been taken)
+      if (actionCount === 0) {
+        try {
+          await browser.waitForLoaded(2000);  // Shorter timeout for initial load
+        } catch {
+          // Ignore timeout - proceed with analysis anyway
+        }
       }
-
-      // Small delay to let dynamic content render
-      await browser.wait(500);
 
       // Analyze current page (always needed for element mapping)
       const pageState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
@@ -147,11 +155,11 @@ async function runGoal(
 
         let visionResult: VisionThinkingResult;
         try {
-          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent);
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
         } catch (err) {
           debug('Vision LLM error:', err);
           await browser.wait(2000);
-          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent);
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
         }
 
         thought = visionResult.thought;
@@ -182,11 +190,11 @@ async function runGoal(
 
         let result: ThinkingResult;
         try {
-          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent);
+          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
         } catch (err) {
           debug('LLM error:', err);
           await browser.wait(2000);
-          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent);
+          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
         }
 
         thought = result.thought;
@@ -251,10 +259,13 @@ async function runGoal(
 
       const execResult = await executeAction(browser, actionToExecute, pageState.elements, documentWriter);
 
-      if (!execResult.success) {
+      // Set feedback for the next LLM iteration
+      if (execResult.success) {
+        lastActionFeedback = `SUCCESS: "${actionDesc}" completed successfully.`;
+      } else {
+        lastActionFeedback = `FAILED: "${actionDesc}" failed with error: ${execResult.error}. Try a different approach.`;
         debug('Action failed: %s', execResult.error);
         transcript.push(`[${new Date().toISOString()}] Error: ${execResult.error}`);
-        // Continue anyway, LLM may recover
       }
 
       // Clear last read content after using it (it's been included in this iteration's context)
@@ -271,8 +282,9 @@ async function runGoal(
       }
 
       // Wait for page to settle (loading indicators gone, network idle)
+      // Use shorter timeout - if page has loading indicators they should appear quickly
       try {
-        await browser.waitForLoaded(5000);
+        await browser.waitForLoaded(2000);
       } catch {
         // Timeout is fine - proceed anyway
       }
