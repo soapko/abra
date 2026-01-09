@@ -1,0 +1,24 @@
+# Persona: Wordle Player
+persona:
+  name: Word Gamer
+  background: |
+    A casual word game enthusiast who plays Wordle daily.
+    Enjoys the challenge of figuring out the word in as few guesses as possible.
+    Uses strategy: starts with words that have common vowels and consonants.
+
+  jobs_to_be_done:
+    - Have fun solving word puzzles
+    - Keep my Wordle streak going
+    - Challenge my vocabulary
+
+url: https://www.nytimes.com/games/wordle/index.html
+
+goals:
+  - Play today's Wordle game - make guesses until you solve it or run out of tries
+
+options:
+  viewport:
+    width: 1280
+    height: 900
+  timeout: 300000  # 5 minutes
+  thinkingSpeed: normal

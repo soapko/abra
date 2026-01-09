@@ -60,6 +60,16 @@ src/
 - Falls back to event dispatch for non-link elements
 - Works with Reddit search suggestions and other shadow DOM components
 
+### Document Writing
+- Personas can create and maintain documents during sessions
+- LLM-driven: decides when to document based on goal cues (document, note, track, compare)
+- Full CRUD operations: create, read, update (with section targeting), append
+- Documents saved to `sessions/<session>/docs/`
+- Supports markdown, JSON, and custom file extensions
+- Document index shown to LLM each iteration for context
+- Size limit: 100KB per document
+- Filename sanitization prevents path traversal
+
 ## CLI Commands
 
 - `abra run <persona.yaml>` - Run simulation

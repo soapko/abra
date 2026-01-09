@@ -100,6 +100,24 @@
   - `document.elementFromPoint()` returns shadow host, not inner element
   - **Fixed**: Added `deepElementFromPoint()` to pierce shadow DOM and direct href navigation for links
 
+## 009.features
+
+- [✅] **Task 15: Document writing capability** -> [009.features.01-document-writing.md](docs/tasks/009.features.01-document-writing.md)
+  - Enable persona to write/update documents during session
+  - LLM-driven: persona decides when to document based on goal text
+  - Full CRUD: create, read, update, append operations
+  - Supports markdown, JSON, and custom file formats
+  - Documents saved to `sessions/<session>/docs/`
+
+## 010.research
+
+- [ ] **Task 16: Evaluate Abra vs Puppet for automated testing** -> [010.research.01-abra-vs-puppet-testing.md](docs/tasks/010.research.01-abra-vs-puppet-testing.md)
+  - Compare reliability, test creation effort, coverage, speed
+  - Identify good vs poor fit use cases
+  - Propose hybrid testing strategy
+  - Answer key questions about determinism and cost
+  - Prototype Abra → Puppet test script generation
+
 ---
 
 ## Task Status Key
