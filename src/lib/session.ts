@@ -29,6 +29,7 @@ import {
   getHideScript,
   getDestroyScript,
 } from './speech-bubble.js';
+import { DocumentWriter } from './document-writer.js';
 
 const debug = createDebug('abra:session');
 
@@ -83,7 +84,8 @@ async function runGoal(
   persona: PersonaConfig,
   goal: string,
   goalIndex: number,
-  options: SessionOptions
+  options: SessionOptions,
+  documentWriter: DocumentWriter
 ): Promise<GoalResult> {
   const startTime = Date.now();
   const actionHistory: string[] = [];
@@ -139,13 +141,17 @@ async function runGoal(
         // Generate element legend for the prompt
         const elementLegend = formatElementLegend(pageState.elements);
 
+        // Get document context for LLM
+        const docIndex = documentWriter.formatIndexForLLM();
+        const lastReadContent = documentWriter.getLastReadContent();
+
         let visionResult: VisionThinkingResult;
         try {
-          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory);
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent);
         } catch (err) {
           debug('Vision LLM error:', err);
           await browser.wait(2000);
-          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory);
+          visionResult = await getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent);
         }
 
         thought = visionResult.thought;
@@ -169,13 +175,18 @@ async function runGoal(
         };
       } else {
         // STANDARD MODE: Use HTML analysis for decision-making
+
+        // Get document context for LLM
+        const docIndex = documentWriter.formatIndexForLLM();
+        const lastReadContent = documentWriter.getLastReadContent();
+
         let result: ThinkingResult;
         try {
-          result = await getNextAction(persona, goal, pageState, actionHistory);
+          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent);
         } catch (err) {
           debug('LLM error:', err);
           await browser.wait(2000);
-          result = await getNextAction(persona, goal, pageState, actionHistory);
+          result = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent);
         }
 
         thought = result.thought;
@@ -202,7 +213,11 @@ async function runGoal(
         await browser.evaluate(getShowScript(thought, 700, 400));
       }
 
-      // Human-like thinking pause
+      // Wait for typing animation to complete (30ms per character)
+      const typingDuration = thought.length * 30;
+      await browser.wait(typingDuration);
+
+      // Human-like thinking pause (so viewer can read the complete thought)
       await browser.wait(getHumanDelay(thinkingDelay.min, thinkingDelay.max));
 
       // Check for terminal actions
@@ -234,13 +249,16 @@ async function runGoal(
       options.onAction?.(actionDesc, goalIndex);
       debug('Action: %s', actionDesc);
 
-      const execResult = await executeAction(browser, actionToExecute, pageState.elements);
+      const execResult = await executeAction(browser, actionToExecute, pageState.elements, documentWriter);
 
       if (!execResult.success) {
         debug('Action failed: %s', execResult.error);
         transcript.push(`[${new Date().toISOString()}] Error: ${execResult.error}`);
         // Continue anyway, LLM may recover
       }
+
+      // Clear last read content after using it (it's been included in this iteration's context)
+      documentWriter.clearLastReadContent();
 
       actionHistory.push(actionDesc);
       actionCount++;
@@ -252,8 +270,12 @@ async function runGoal(
         // Page may have navigated, will re-inject speech bubble on next iteration
       }
 
-      // Wait for page to settle
-      await browser.wait(getHumanDelay(500, 1000));
+      // Wait for page to settle (loading indicators gone, network idle)
+      try {
+        await browser.waitForLoaded(5000);
+      } catch {
+        // Timeout is fine - proceed anyway
+      }
 
       // Re-inject speech bubble in case page navigated
       try {
@@ -306,6 +328,10 @@ export async function runSession(
 
   await ensureOutputDir(sessionDir);
 
+  // Initialize document writer for this session
+  const documentWriter = new DocumentWriter(sessionDir);
+  await documentWriter.initialize();
+
   const startedAt = new Date().toISOString();
   const goalResults: GoalResult[] = [];
 
@@ -337,7 +363,8 @@ export async function runSession(
         persona,
         goal,
         i,
-        options
+        options,
+        documentWriter
       );
 
       // Get video path if available
@@ -371,9 +398,6 @@ export async function runSession(
     } finally {
       await browserSession.close();
     }
-
-    // Brief pause between goals
-    await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
   const completedAt = new Date().toISOString();
