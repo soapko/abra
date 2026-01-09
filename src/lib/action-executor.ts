@@ -5,6 +5,7 @@
 import createDebug from 'debug';
 import type { Action } from './llm.js';
 import type { PageElement } from './page-analyzer.js';
+import type { DocumentWriter } from './document-writer.js';
 
 const debug = createDebug('abra:executor');
 
@@ -94,7 +95,8 @@ async function tryClickWithFallback(
 export async function executeAction(
   browser: Browser,
   action: Action,
-  elements: PageElement[]
+  elements: PageElement[],
+  documentWriter?: DocumentWriter
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
 
@@ -219,6 +221,48 @@ export async function executeAction(
         const duration = action.duration || 1000;
         debug('Waiting %dms', duration);
         await browser.wait(duration);
+        break;
+      }
+
+      case 'document': {
+        if (!action.document) {
+          throw new Error('No document config for document action');
+        }
+        if (!documentWriter) {
+          throw new Error('Document writer not initialized');
+        }
+
+        const { operation, filename, content, section } = action.document;
+        debug('Document action: %s %s', operation, filename);
+
+        switch (operation) {
+          case 'create':
+            if (!content) throw new Error('No content for create operation');
+            const createResult = await documentWriter.create(filename, content);
+            if (!createResult.success) throw new Error(createResult.error);
+            break;
+
+          case 'read':
+            const readResult = await documentWriter.read(filename);
+            if (!readResult.success) throw new Error(readResult.error);
+            // Content is stored in documentWriter.lastReadContent for next LLM call
+            break;
+
+          case 'update':
+            if (!content) throw new Error('No content for update operation');
+            const updateResult = await documentWriter.update(filename, content, section);
+            if (!updateResult.success) throw new Error(updateResult.error);
+            break;
+
+          case 'append':
+            if (!content) throw new Error('No content for append operation');
+            const appendResult = await documentWriter.append(filename, content);
+            if (!appendResult.success) throw new Error(appendResult.error);
+            break;
+
+          default:
+            throw new Error(`Unknown document operation: ${operation}`);
+        }
         break;
       }
 

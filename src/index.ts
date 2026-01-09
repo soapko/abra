@@ -31,8 +31,17 @@ export {
   formatAction,
   type Action,
   type ActionType,
+  type DocumentOperation,
   type ThinkingResult,
 } from './lib/llm.js';
+
+// Document writing
+export {
+  DocumentWriter,
+  type DocumentInfo,
+  type DocumentWriteResult,
+  type DocumentReadResult,
+} from './lib/document-writer.js';
 
 // Action execution
 export {

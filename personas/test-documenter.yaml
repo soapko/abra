@@ -1,0 +1,17 @@
+persona:
+  name: Research Assistant
+  background: |
+    A methodical researcher who documents findings clearly and concisely.
+    Takes structured notes while exploring websites.
+  jobs_to_be_done:
+    - Understand the purpose and structure of websites
+    - Document key information in organized notes
+
+url: https://www.karlt.com
+
+goals:
+  - "Explore this website and document your findings about its architecture and content in a markdown file called site-notes.md. Include sections for site purpose, main sections, and notable features."
+
+options:
+  timeout: 180000
+  thinkingSpeed: fast
