@@ -140,6 +140,37 @@ export const PAGE_ANALYZER_SCRIPT = `
     }
   });
 
+  // Search inside portal containers (Radix UI, Floating UI, Headless UI)
+  // These are rendered as direct children of document.body via React portals
+  const portalSelectors = [
+    '[data-radix-popper-content-wrapper]',
+    '[data-radix-portal]',
+    '[data-radix-menu-content]',
+    '[data-radix-select-content]',
+    '[data-radix-dropdown-menu-content]',
+    '[data-floating-ui-portal]',
+    '[data-headlessui-portal]',
+    '[role="dialog"]:not([data-testid])',
+    '[role="listbox"]',
+    '[role="menu"]',
+  ];
+  const portalElements = [];
+  const portalContainers = document.querySelectorAll(portalSelectors.join(', '));
+  portalContainers.forEach(container => {
+    // Search for interactive elements inside the portal
+    const portalInteractive = container.querySelectorAll(interactiveSelectors);
+    portalInteractive.forEach(el => portalElements.push(el));
+    // Also grab elements that are clickable by role/pattern but not in the main selector list
+    const extraInteractive = container.querySelectorAll(
+      'div[class*="color"], span[class*="color"], ' +
+      'div[data-state], span[data-state], ' +
+      'div[data-value], span[data-value], ' +
+      '[role="option"], [role="menuitemradio"], [role="menuitemcheckbox"], ' +
+      '[data-radix-collection-item]'
+    );
+    extraInteractive.forEach(el => portalElements.push(el));
+  });
+
   // Helper to check if element is truly visible
   const isElementVisible = (el) => {
     const rect = el.getBoundingClientRect();
@@ -274,8 +305,8 @@ export const PAGE_ANALYZER_SCRIPT = `
     return selector;
   };
 
-  // Combine regular elements and shadow DOM elements
-  const allElements = [...elements, ...shadowElements];
+  // Combine regular elements, shadow DOM elements, and portal elements
+  const allElements = [...elements, ...shadowElements, ...portalElements];
 
   allElements.forEach((el) => {
     if (!isElementVisible(el)) return;

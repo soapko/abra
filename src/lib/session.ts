@@ -130,6 +130,7 @@ async function executeBatch(
     pagePath: string;
   }
 ): Promise<BatchExecutionResult> {
+  const batchT0 = Date.now();
   const results: BatchActionResult[] = [];
   let terminalAction: Action | undefined;
   let urlChanged = false;
@@ -154,6 +155,7 @@ async function executeBatch(
       break;
     }
 
+    const actionT0 = Date.now();
     const actionDesc = formatFn(action);
     callbacks.onAction(actionDesc);
 
@@ -169,6 +171,7 @@ async function executeBatch(
 
     // Execute the action
     const execResult = await executeAction(browser, action, elements, documentWriter);
+    debug('  Action %d/%d executed in %dms: %s', i + 1, actions.length, Date.now() - actionT0, actionDesc);
 
     results.push({
       actionDesc,
@@ -272,8 +275,9 @@ async function executeBatch(
     }
   }
 
-  debug('Batch complete: %d/%d actions executed%s',
-    results.length, actions.length,
+  const batchElapsed = Date.now() - batchT0;
+  debug('Batch complete: %d/%d actions in %dms%s',
+    results.length, actions.length, batchElapsed,
     bailReason ? ` (bailed: ${bailReason})` : '');
 
   return {
@@ -335,9 +339,12 @@ async function runGoal(
         }
       }
 
+      const iterT0 = Date.now();
+
       // Analyze current page (always needed for element mapping)
+      const analyzeT0 = Date.now();
       const pageState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
-      debug('Page analyzed: %s (%d elements)', pageState.title, pageState.elements.length);
+      debug('Page analyzed in %dms: %s (%d elements)', Date.now() - analyzeT0, pageState.title, pageState.elements.length);
 
       // Extract page content for observer (if enabled)
       let pageContent: PageContent | null = null;
@@ -398,6 +405,7 @@ async function runGoal(
       }
 
       // Run navigator and observer concurrently
+      const llmT0 = Date.now();
       let navigatorResult: BatchThinkingResult | VisionBatchThinkingResult;
       let observerResult: ObserverResult | null = null;
 
@@ -448,6 +456,8 @@ async function runGoal(
         }
       }
 
+      debug('LLM call resolved in %dms', Date.now() - llmT0);
+
       // Process observer document action (file I/O only, no browser contention)
       if (observerResult && observerResult.action.type === 'document' && observerResult.action.document) {
         const doc = observerResult.action.document;
@@ -483,6 +493,17 @@ async function runGoal(
 
         // Resolve ALL actions' elementIds to selectors
         actionsToExecute = visionResult.actions.map(vAction => {
+          // Coordinate fallback: LLM specified x/y instead of elementId
+          if (vAction.x !== undefined && vAction.y !== undefined && vAction.elementId === undefined) {
+            debug('Vision coordinate fallback: click at (%d, %d)', vAction.x, vAction.y);
+            return {
+              ...vAction,
+              // Store coordinates as sourceX/sourceY so action executor can use mouse.click
+              sourceX: vAction.x,
+              sourceY: vAction.y,
+            };
+          }
+
           const element = vAction.elementId !== undefined
             ? pageState.elements.find(el => el.id === vAction.elementId) ?? null
             : null;
@@ -628,6 +649,8 @@ async function runGoal(
       } catch {
         // Ignore
       }
+
+      debug('Iteration complete in %dms (LLM: %dms, actions: %d)', Date.now() - iterT0, Date.now() - llmT0, batchResult.completedCount);
 
       // Safety: max 100 actions per goal
       if (actionCount >= 100) {

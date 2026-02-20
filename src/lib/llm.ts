@@ -118,13 +118,24 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING:
-You may include MULTIPLE actions when confident they can execute in rapid
-sequence WITHOUT needing to re-read the page. Keep batches SHORT (2-4 actions).
-Use a single action when uncertain what happens next.
+ACTION BATCHING — IMPORTANT:
+You SHOULD return multiple actions whenever the next steps are predictable.
+Each sensing cycle (screenshot + LLM call) is expensive — 5-15 seconds.
+Batching saves enormous time. The system will automatically bail out if
+something unexpected happens, so err on the side of batching more.
 
-Good batches: click search field + type query + press Enter. Click dropdown + click visible option.
-Bad batches: click a link (causes navigation), submit a form (unknown result page).
+ALWAYS batch these patterns (2-5 actions):
+- Form filling: click field + type text + press Tab/Enter
+- Search: click search box + type query + press Enter
+- Dropdown: click dropdown + click the option you want
+- Menu navigation: click menu item + click sub-item
+- Settings: click toggle/checkbox + click another toggle/checkbox
+- Multi-step UI: click button + fill field + click submit
+
+Only use a SINGLE action when:
+- You genuinely don't know what will appear (first page load, after navigation)
+- The action causes navigation to a new page (link click, form submit to new URL)
+- You need to READ what appeared before deciding (opened an unfamiliar dialog)
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -158,7 +169,8 @@ Rules:
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
 - Be specific about which element to interact with using elementId
-- Keep thoughts natural and conversational`;
+- Keep thoughts natural and conversational
+- PREFER batching multiple actions over single actions — be efficient`;
 }
 
 /**
@@ -413,7 +425,7 @@ ${persona.persona.jobs_to_be_done.map(j => `- ${j}`).join('\n')}
 
 You are looking at an ANNOTATED screenshot of a website. Interactive elements are marked with RED boxes and numbered labels like [0], [1], [2], etc.
 
-IMPORTANT: Use the element numbers from the annotations to specify which element to interact with. Do NOT guess coordinates.
+IMPORTANT: Use the element numbers from the annotations to specify which element to interact with.
 
 Your response MUST be valid JSON with this exact structure:
 {
@@ -422,6 +434,8 @@ Your response MUST be valid JSON with this exact structure:
     {
       "type": "click|type|press|scroll|hover|drag|wait|done|failed",
       "elementId": <the number from the red label, e.g. 5 for [5]>,
+      "x": <pixel x coordinate for coordinate fallback click>,
+      "y": <pixel y coordinate for coordinate fallback click>,
       "targetElementId": <number of target element for drag>,
       "sourceX": <pixel x for coordinate-based drag>,
       "sourceY": <pixel y for coordinate-based drag>,
@@ -438,13 +452,25 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING:
-You may include MULTIPLE actions when confident they can execute in rapid
-sequence WITHOUT needing to re-read the page. Keep batches SHORT (2-4 actions).
-Use a single action when uncertain what happens next.
+ACTION BATCHING — IMPORTANT:
+You SHOULD return multiple actions whenever the next steps are predictable.
+Each sensing cycle (screenshot + LLM call) is expensive — 5-15 seconds.
+Batching saves enormous time. The system will automatically bail out if
+something unexpected happens, so err on the side of batching more.
 
-Good batches: click search field + type query + press Enter. Click dropdown + click visible option.
-Bad batches: click a link (causes navigation), submit a form (unknown result page).
+ALWAYS batch these patterns (2-5 actions):
+- Form filling: click field + type text + press Tab/Enter
+- Search: click search box + type query + press Enter
+- Dropdown: click dropdown + click the option you want
+- Menu navigation: click menu item + click sub-item
+- Settings: click toggle/checkbox + click another toggle/checkbox
+- Multi-step UI: click button + fill field + click submit
+- Theme customizer: click color category + click color swatch
+
+Only use a SINGLE action when:
+- You genuinely don't know what will appear (first page load, after navigation)
+- The action causes navigation to a new page (link click, form submit to new URL)
+- You need to READ what appeared before deciding (opened an unfamiliar dialog)
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -467,6 +493,14 @@ Use the "document" action type with these operations:
 Formats: .md (Markdown), .json (JSON), .txt (plain text), or any custom extension.
 Document when your goal mentions: document, record, note, track, log, compare, write down.
 
+COORDINATE FALLBACK:
+If you see an interactive element in the screenshot that has NO red numbered label
+(e.g., color swatches, popover items, dropdown options that appeared after an action),
+you may specify a coordinate-based click using "x" and "y" fields instead of "elementId":
+{"type": "click", "x": 450, "y": 320}
+Estimate coordinates from the screenshot (viewport is typically 1440x900).
+Only use this when no annotated element covers what you need to click.
+
 Rules:
 - CRITICAL: Look at the RED numbered labels [0], [1], [2] etc in the screenshot and use the EXACT number for the element you want to interact with
 - The Element Legend below tells you what each [number] refers to - use it to verify you're selecting the right element
@@ -478,7 +512,8 @@ Rules:
 - Use "done" when you believe the goal has been achieved
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
-- For typing: first click the input field, then type in a separate action`;
+- For typing: first click the input field, then type in a separate action
+- PREFER batching multiple actions over single actions — be efficient. If you can see the elements you need to interact with, batch the clicks together`;
 }
 
 /**
@@ -540,6 +575,9 @@ function buildVisionUserPrompt(
 export interface VisionAction extends Action {
   // Element ID from the annotated screenshot labels
   elementId?: number;
+  // Coordinate-based click fallback (when element has no annotation)
+  x?: number;
+  y?: number;
 }
 
 export interface VisionThinkingResult {
@@ -853,7 +891,7 @@ export function formatBatchFeedback(
   if (results.length === 1) {
     const r = results[0];
     return r.success
-      ? `SUCCESS: "${r.actionDesc}" completed successfully.`
+      ? `SUCCESS: "${r.actionDesc}" completed. TIP: You can batch multiple actions in one response to be faster — the system will bail out safely if anything unexpected happens.`
       : `FAILED: "${r.actionDesc}" failed with error: ${r.error}. Try a different approach.`;
   }
 

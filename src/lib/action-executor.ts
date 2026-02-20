@@ -105,6 +105,14 @@ export async function executeAction(
   try {
     switch (action.type) {
       case 'click': {
+        // Coordinate-based click (vision fallback or explicit coordinates)
+        if (action.sourceX !== undefined && action.sourceY !== undefined && !action.elementId && !action.selector) {
+          if (!browser.mouse) throw new Error('Browser does not support coordinate clicks');
+          debug('Coordinate click at (%d, %d)', action.sourceX, action.sourceY);
+          await browser.mouse.click(action.sourceX, action.sourceY);
+          break;
+        }
+
         const element = action.elementId !== undefined
           ? findElement(elements, action.elementId)
           : null;

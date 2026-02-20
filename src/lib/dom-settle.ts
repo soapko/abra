@@ -38,20 +38,24 @@ export async function waitForDOMSettle(
 ): Promise<void> {
   const { timeout = 2000, quietPeriod = 100 } = options;
 
+  const t0 = Date.now();
   try {
-    await browser.evaluate(`
+    const settleMs = await browser.evaluate(`
       new Promise((resolve) => {
-        if (!document.body) { resolve(); return; }
+        const _t0 = performance.now();
+        if (!document.body) { resolve(0); return; }
 
         let timer;
         let hardTimeout;
+        let mutationCount = 0;
 
         const observer = new MutationObserver(() => {
+          mutationCount++;
           clearTimeout(timer);
           timer = setTimeout(() => {
             observer.disconnect();
             clearTimeout(hardTimeout);
-            resolve();
+            resolve(JSON.stringify({ elapsed: Math.round(performance.now() - _t0), mutations: mutationCount, reason: 'quiet' }));
           }, ${quietPeriod});
         });
 
@@ -63,18 +67,25 @@ export async function waitForDOMSettle(
         hardTimeout = setTimeout(() => {
           observer.disconnect();
           clearTimeout(timer);
-          resolve();
+          resolve(JSON.stringify({ elapsed: Math.round(performance.now() - _t0), mutations: mutationCount, reason: 'timeout' }));
         }, ${timeout});
 
         timer = setTimeout(() => {
           observer.disconnect();
-          resolve();
+          resolve(JSON.stringify({ elapsed: Math.round(performance.now() - _t0), mutations: mutationCount, reason: 'no-mutations' }));
         }, ${quietPeriod});
       });
-    `);
+    `) as string;
+
+    const elapsed = Date.now() - t0;
+    try {
+      const info = JSON.parse(settleMs as string);
+      debug('DOM settled in %dms (in-page: %dms, mutations: %d, reason: %s)', elapsed, info.elapsed, info.mutations, info.reason);
+    } catch {
+      debug('DOM settled in %dms', elapsed);
+    }
   } catch {
-    // Page likely navigated — the old context is gone.
-    // Navigation itself is the "settle" signal, so resolve immediately.
-    debug('evaluate() rejected (page likely navigated) — treating as settled');
+    const elapsed = Date.now() - t0;
+    debug('DOM settle: page navigated (%dms) — treating as settled', elapsed);
   }
 }

@@ -147,6 +147,14 @@
   - Cold start = current behavior; gets faster with each visit to a domain
   - **Depends on:** 013.core.01 (DOM Settle Detection), 011.features.01 (Batch Action Execution)
 
+## 014.bugfix
+
+- [◒] **Task 20: Portal scanning + vision coordinate fallback** -> [014.bugfix.01-portal-scanning-vision-fallback.md](docs/tasks/014.bugfix.01-portal-scanning-vision-fallback.md)
+  - Page analyzer now scans Radix/Floating/Headless UI portal containers
+  - Vision prompt allows coordinate-based clicks for unannotated elements
+  - Action executor handles coordinate clicks from vision fallback
+  - Tested against shadcn customizer: purple theme + Maia style + Large radius selected
+
 ---
 
 ## Task Status Key

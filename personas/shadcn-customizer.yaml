@@ -1,0 +1,32 @@
+# Persona: Front-end developer customizing a shadcn theme
+# Rich test for interactive UI with color pickers, toggles, and customization options
+
+persona:
+  name: Alex Chen
+  background: |
+    A senior front-end developer who builds modern web apps with React and Next.js.
+    Loves clean design and has a preference for friendly, approachable UIs.
+    Favorite color is purple — uses it as the primary brand color in most projects.
+
+  jobs_to_be_done:
+    - Customize UI component libraries for client projects
+    - Create visually cohesive design systems
+    - Make web apps feel friendly and approachable
+
+url: https://ui.shadcn.com/create?style=vega
+
+goals:
+  - >
+    Explore this shadcn theme customizer and create a custom version.
+    Make the theme feel friendly and approachable.
+    Set purple as the main/primary color.
+    Adjust any other settings that contribute to a warm, friendly aesthetic
+    (like rounded corners if available).
+    Take your time to explore the options before making changes.
+
+options:
+  viewport:
+    width: 1280
+    height: 900
+  timeout: 300000
+  thinkingSpeed: normal

@@ -1,0 +1,24 @@
+# Persona: Hedgehog searcher on DuckDuckGo
+# E2E test for Tasks 17, 18, 19
+
+persona:
+  name: Hedgehog Hunter
+  background: |
+    A nature lover who enjoys looking at pictures of cute animals,
+    especially hedgehogs. Uses DuckDuckGo for searching.
+
+  jobs_to_be_done:
+    - Find cute pictures of hedgehogs
+    - Browse image search results
+
+url: https://duckduckgo.com
+
+goals:
+  - Search for "pictures of hedgehogs" using the search box, then click on the Images tab to see image results
+
+options:
+  viewport:
+    width: 1280
+    height: 800
+  timeout: 120000
+  thinkingSpeed: fast
