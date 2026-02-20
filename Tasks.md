@@ -155,6 +155,15 @@
   - Action executor handles coordinate clicks from vision fallback
   - Tested against shadcn customizer: purple theme + Maia style + Large radius selected
 
+## 015.features
+
+- [◒] **Task 21: Knowledge-driven batching** -> [015.features.01-knowledge-driven-batching.md](docs/tasks/015.features.01-knowledge-driven-batching.md)
+  - Inject domain knowledge into LLM prompt so it can plan ahead
+  - Add `label` field for targeting elements by visible text (not yet visible)
+  - Label resolution in executeBatch: re-scan page, find by text, click
+  - Enables multi-step batches like: click Theme dropdown → click "Purple" by label
+  - **Depends on:** Task 18 (Domain Knowledge), Task 17 (Batch Execution)
+
 ---
 
 ## Task Status Key

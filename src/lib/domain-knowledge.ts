@@ -192,6 +192,55 @@ export class DomainKnowledgeStore {
     this.pendingWrites.get(domain)!.push(record);
   }
 
+  /**
+   * Get all transitions for a domain (optionally filtered by page path).
+   */
+  getTransitionsForDomain(domain: string, pagePath?: string): TransitionRecord[] {
+    const results: TransitionRecord[] = [];
+    for (const [key, record] of this.transitions.entries()) {
+      if (!key.startsWith(domain + '|')) continue;
+      if (pagePath && record.pagePath !== pagePath) continue;
+      results.push(record);
+    }
+    return results;
+  }
+
+  /**
+   * Build a human-readable summary of domain knowledge for LLM prompt injection.
+   * Describes what happens when actions are taken — what appears, disappears, changes.
+   */
+  getKnowledgeSummary(domain: string): string {
+    const transitions = this.getTransitionsForDomain(domain);
+    if (transitions.length === 0) return '';
+
+    const lines: string[] = [];
+
+    for (const t of transitions) {
+      const actionDesc = formatActionDesc(t.action);
+      const outcomeDesc = formatOutcomeDesc(t.expectedOutcome);
+      if (actionDesc && outcomeDesc) {
+        lines.push(`- ${actionDesc} → ${outcomeDesc}`);
+      }
+    }
+
+    if (lines.length === 0) return '';
+
+    return [
+      'From previous visits, the system has observed these UI interactions:',
+      ...lines,
+      '',
+      'IMPORTANT: These observations show UI STRUCTURE (what buttons/menus exist and what they reveal),',
+      'NOT recommendations for what to choose. Specific options listed (like color names, style names)',
+      'are just what a previous session happened to pick — make YOUR OWN choices based on your',
+      'persona\'s personality and the current goal. Explore options that haven\'t been tried yet.',
+      '',
+      'Use structural knowledge to BATCH actions — if you know clicking a button reveals a dropdown,',
+      'plan both actions: [click button, click option by label]. For elements that will APPEAR after',
+      'a preceding action, use "label" instead of "elementId":',
+      '{"type": "click", "label": "Rose"} — the system will find the element after it appears.',
+    ].join('\n');
+  }
+
   private countForDomain(domain: string): number {
     let count = 0;
     for (const key of this.transitions.keys()) {
@@ -278,6 +327,85 @@ function signatureMatches(a: ElementSignature, b: ElementSignature): boolean {
 
   // Same tagName, no conflicting fields → assume match
   return true;
+}
+
+/**
+ * Format an action description for human-readable summary.
+ */
+function formatActionDesc(action: ActionSignature): string {
+  const elDesc = describeElement(action.signature);
+  switch (action.type) {
+    case 'click':
+      return `Clicking ${elDesc}`;
+    case 'type':
+      return `Typing "${action.text}" into ${elDesc}`;
+    case 'press':
+      return `Pressing ${action.key || 'Enter'}`;
+    case 'hover':
+      return `Hovering over ${elDesc}`;
+    default:
+      return `${action.type} on ${elDesc}`;
+  }
+}
+
+/**
+ * Describe an element signature in human-readable form.
+ */
+function describeElement(sig: ElementSignature): string {
+  if (sig.ariaLabel) return `"${sig.ariaLabel}" ${sig.tagName.toLowerCase()}`;
+  if (sig.textContent) return `"${sig.textContent}" ${sig.tagName.toLowerCase()}`;
+  if (sig.testId) return `[${sig.testId}] ${sig.tagName.toLowerCase()}`;
+  if (sig.role) return `${sig.role} ${sig.tagName.toLowerCase()}`;
+  return sig.tagName.toLowerCase();
+}
+
+/**
+ * Format an outcome (StateDelta) in human-readable form.
+ */
+function formatOutcomeDesc(delta: StateDelta): string {
+  const parts: string[] = [];
+
+  if (delta.visibilityChanges?.length) {
+    const appeared = delta.visibilityChanges.filter(v => v.appeared);
+    const disappeared = delta.visibilityChanges.filter(v => !v.appeared);
+
+    for (const v of appeared) {
+      const desc = describeElement(v.signature);
+      // Extract option items from textContent if it looks like a menu/list
+      const text = v.signature.textContent || '';
+      const items = text.split(/[\n\r]+/).map(s => s.trim()).filter(s => s.length > 0 && s.length < 40);
+      if (items.length > 1) {
+        parts.push(`reveals ${desc} with options: ${items.slice(0, 6).map(i => `"${i}"`).join(', ')}${items.length > 6 ? '...' : ''}`);
+      } else {
+        parts.push(`${desc} appears`);
+      }
+    }
+
+    for (const v of disappeared) {
+      const desc = describeElement(v.signature);
+      parts.push(`${desc} disappears`);
+    }
+  }
+
+  if (delta.ariaChanges?.length) {
+    for (const c of delta.ariaChanges) {
+      if (c.attribute === 'aria-expanded') {
+        const desc = describeElement(c.signature);
+        parts.push(c.newValue === 'true' ? `${desc} expands` : `${desc} collapses`);
+      }
+    }
+  }
+
+  if (delta.urlChanged) {
+    parts.push(`navigates to ${delta.urlChanged.to}`);
+  }
+
+  if (delta.focusChanged?.gainedFocus) {
+    const desc = describeElement(delta.focusChanged.gainedFocus);
+    parts.push(`${desc} gains focus`);
+  }
+
+  return parts.join('; ');
 }
 
 /**

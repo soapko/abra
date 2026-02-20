@@ -29,6 +29,7 @@ import { executeAction, getElementCenter, getHumanDelay, type Browser } from './
 import {
   getInitScript,
   getShowScript,
+  getShowThinkingScript,
   getHideScript,
   getDestroyScript,
 } from './speech-bubble.js';
@@ -135,6 +136,8 @@ async function executeBatch(
   let terminalAction: Action | undefined;
   let urlChanged = false;
   let bailReason: string | undefined;
+  // Mutable copy — may be refreshed during label resolution
+  let currentElements = elements;
 
   // Get initial URL for change detection
   let currentUrl: string;
@@ -155,13 +158,50 @@ async function executeBatch(
       break;
     }
 
+    // Label resolution: if action has label but no elementId/selector, find element by text
+    if (action.label && action.elementId === undefined && !action.selector) {
+      debug('Resolving label "%s" — re-scanning page', action.label);
+
+      // Wait for DOM to settle (the preceding action may have opened a dropdown)
+      await waitForDOMSettle(browser);
+
+      try {
+        // Re-run page analyzer to get fresh elements
+        const freshState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
+        const label = action.label.toLowerCase();
+
+        // Find element by: exact text match, then contains, then ariaLabel
+        const match =
+          freshState.elements.find(el => el.text.toLowerCase() === label) ||
+          freshState.elements.find(el => el.text.toLowerCase().includes(label)) ||
+          freshState.elements.find(el => el.ariaLabel?.toLowerCase() === label) ||
+          freshState.elements.find(el => el.ariaLabel?.toLowerCase().includes(label));
+
+        if (match) {
+          debug('Label "%s" resolved to element [%d] (%s): %s', action.label, match.id, match.tag, match.selector);
+          action.elementId = match.id;
+          action.selector = match.selector;
+          // Update elements reference so downstream lookups work
+          currentElements = freshState.elements;
+        } else {
+          bailReason = `label not found: "${action.label}"`;
+          debug('Label resolution failed: no element matching "%s" (scanned %d elements)', action.label, freshState.elements.length);
+          break;
+        }
+      } catch (err) {
+        bailReason = `label resolution error: ${err}`;
+        debug('Label resolution error: %s', err);
+        break;
+      }
+    }
+
     const actionT0 = Date.now();
     const actionDesc = formatFn(action);
     callbacks.onAction(actionDesc);
 
     // Find the target element for knowledge lookups and observer scoping
     const targetElement = action.elementId !== undefined
-      ? elements.find(el => el.id === action.elementId)
+      ? currentElements.find(el => el.id === action.elementId)
       : null;
 
     // Install state observer before action (if learning)
@@ -170,7 +210,7 @@ async function executeBatch(
     }
 
     // Execute the action
-    const execResult = await executeAction(browser, action, elements, documentWriter);
+    const execResult = await executeAction(browser, action, currentElements, documentWriter);
     debug('  Action %d/%d executed in %dms: %s', i + 1, actions.length, Date.now() - actionT0, actionDesc);
 
     results.push({
@@ -248,11 +288,11 @@ async function executeBatch(
       break;
     }
 
-    // Check next action's target element still exists
+    // Check next action's target element still exists (skip for label-based actions — they'll be resolved later)
     const nextAction = actions[i + 1];
-    if (nextAction && nextAction.type !== 'done' && nextAction.type !== 'failed') {
+    if (nextAction && nextAction.type !== 'done' && nextAction.type !== 'failed' && !nextAction.label) {
       const nextElement = nextAction.elementId !== undefined
-        ? elements.find(el => el.id === nextAction.elementId)
+        ? currentElements.find(el => el.id === nextAction.elementId)
         : null;
       const nextSelector = nextElement?.selector || nextAction.selector;
 
@@ -341,6 +381,19 @@ async function runGoal(
 
       const iterT0 = Date.now();
 
+      // Show "thinking..." bubble while we do analysis + LLM call
+      // Use last known position or center of viewport
+      const thinkingShownAt = Date.now();
+      try {
+        await browser.evaluate(getShowThinkingScript(700, 400));
+      } catch {
+        // Bubble not available, re-inject
+        try {
+          await browser.evaluate(getInitScript(persona.persona.name));
+          await browser.evaluate(getShowThinkingScript(700, 400));
+        } catch { /* proceed without bubble */ }
+      }
+
       // Analyze current page (always needed for element mapping)
       const analyzeT0 = Date.now();
       const pageState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
@@ -366,6 +419,14 @@ async function runGoal(
       const docIndex = documentWriter.formatIndexForLLM();
       const lastReadContent = documentWriter.getLastReadContent();
 
+      // Get domain knowledge summary for prompt injection
+      const knowledgeSummary = knowledgeStore
+        ? knowledgeStore.getKnowledgeSummary(domain) || null
+        : null;
+      if (knowledgeSummary) {
+        debug('Injecting domain knowledge (%d chars) into prompt', knowledgeSummary.length);
+      }
+
       let navigatorPromise: Promise<BatchThinkingResult | VisionBatchThinkingResult>;
 
       if (sightMode) {
@@ -385,10 +446,10 @@ async function runGoal(
         // Generate element legend for the prompt
         const elementLegend = formatElementLegend(pageState.elements);
 
-        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
       } else {
         // STANDARD MODE: Use HTML analysis for decision-making
-        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
       }
 
       // Build the observer LLM call (if enabled and page content was extracted)
@@ -424,9 +485,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
           }
         }
 
@@ -449,9 +510,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
           }
         }
       }
@@ -542,31 +603,33 @@ async function runGoal(
       options.onThought?.(thought, goalIndex);
       debug('Thought: %s', thought);
 
-      // Show speech bubble at target element position (may fail if page navigated)
+      // Ensure thinking dots are visible for at least the thinking delay duration
+      // (if the LLM call was fast, pad the remaining time so the dots feel natural)
+      const thinkingElapsed = Date.now() - thinkingShownAt;
+      const minThinkingDuration = getHumanDelay(thinkingDelay.min, thinkingDelay.max);
+      const thinkingRemaining = minThinkingDuration - thinkingElapsed;
+      if (thinkingRemaining > 0) {
+        await browser.wait(thinkingRemaining);
+      }
+
+      // Replace thinking animation with actual thought (bubble is already visible)
       try {
         if (targetElement) {
           const center = getElementCenter(targetElement);
           await browser.evaluate(getShowScript(thought, center.x, center.y));
         } else {
-          // Show at center of viewport
           await browser.evaluate(getShowScript(thought, 700, 400));
         }
       } catch {
-        // Speech bubble not available on this page (e.g. captcha), re-inject and retry
         try {
           await browser.evaluate(getInitScript(persona.persona.name));
           await browser.evaluate(getShowScript(thought, 700, 400));
-        } catch {
-          // Still failed — proceed without speech bubble
-        }
+        } catch { /* proceed without bubble */ }
       }
 
       // Wait for typing animation to complete (30ms per character)
       const typingDuration = thought.length * 30;
       await browser.wait(typingDuration);
-
-      // Human-like thinking pause (so viewer can read the complete thought)
-      await browser.wait(getHumanDelay(thinkingDelay.min, thinkingDelay.max));
 
       // Build knowledge context for this iteration
       let knowledgeContext: { store: DomainKnowledgeStore; domain: string; pagePath: string } | undefined;
@@ -633,22 +696,8 @@ async function runGoal(
       // Clear last read content after using it (it's been included in this iteration's context)
       documentWriter.clearLastReadContent();
 
-      // Hide bubble after batch (may fail if page navigated)
-      try {
-        await browser.evaluate(getHideScript());
-      } catch {
-        // Page may have navigated, will re-inject speech bubble on next iteration
-      }
-
       // Wait for DOM to settle after batch
       await waitForDOMSettle(browser);
-
-      // Re-inject speech bubble in case page navigated
-      try {
-        await browser.evaluate(getInitScript(persona.persona.name));
-      } catch {
-        // Ignore
-      }
 
       debug('Iteration complete in %dms (LLM: %dms, actions: %d)', Date.now() - iterT0, Date.now() - llmT0, batchResult.completedCount);
 

@@ -61,9 +61,37 @@ const SPEECH_BUBBLE_CSS = `
   animation: blink 0.8s infinite;
 }
 
+.abra-speech-bubble .thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.abra-speech-bubble .thinking-dots span {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 50%;
+  animation: dot-bounce 1.4s ease-in-out infinite;
+}
+
+.abra-speech-bubble .thinking-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.abra-speech-bubble .thinking-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
 @keyframes blink {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
+}
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
 }
 `;
 
@@ -91,20 +119,30 @@ window.__abraSpeechBubble = {
       document.head.appendChild(style);
     }
 
-    // Create bubble element
-    if (!this.element) {
-      this.element = document.createElement('div');
-      this.element.className = 'abra-speech-bubble';
-      this.element.innerHTML = \`
-        <div class="persona-name">\${this.personaName} thinks...</div>
-        <div class="thought-text"></div>
-      \`;
-      document.body.appendChild(this.element);
-      this.textElement = this.element.querySelector('.thought-text');
+    // Remove any existing orphaned bubble element
+    const existing = document.querySelector('.abra-speech-bubble');
+    if (existing) existing.remove();
+
+    // Always create a fresh bubble element
+    this.element = document.createElement('div');
+    this.element.className = 'abra-speech-bubble';
+    this.element.innerHTML = \`
+      <div class="persona-name">\${this.personaName} thinks...</div>
+      <div class="thought-text"></div>
+    \`;
+    document.body.appendChild(this.element);
+    this.textElement = this.element.querySelector('.thought-text');
+  },
+
+  _ensureAttached() {
+    // Self-heal: if element was detached by SPA navigation or framework re-render
+    if (!this.element || !document.body.contains(this.element)) {
+      this.init(this.personaName);
     }
   },
 
   show(text, x, y) {
+    this._ensureAttached();
     if (!this.element) return;
 
     this.targetText = text;
@@ -157,6 +195,38 @@ window.__abraSpeechBubble = {
     }, 30);
   },
 
+  showThinking(x, y) {
+    this._ensureAttached();
+    if (!this.element) return;
+
+    // Position bubble
+    const bubbleWidth = 300;
+    const bubbleHeight = 80;
+
+    let posX = x - bubbleWidth / 2;
+    let posY = y - bubbleHeight - 30;
+
+    posX = Math.max(10, Math.min(window.innerWidth - bubbleWidth - 10, posX));
+    posY = Math.max(10, posY);
+
+    if (posY < 10) {
+      posY = y + 30;
+    }
+
+    this.element.style.left = posX + 'px';
+    this.element.style.top = posY + 'px';
+    this.element.classList.add('visible');
+
+    // Show animated dots
+    if (this.typeInterval) {
+      clearInterval(this.typeInterval);
+      this.typeInterval = null;
+    }
+    this.currentText = '';
+    this.targetText = '';
+    this.textElement.innerHTML = '<span class="thinking-dots"><span></span><span></span><span></span></span>';
+  },
+
   hide() {
     if (this.element) {
       this.element.classList.remove('visible');
@@ -168,6 +238,7 @@ window.__abraSpeechBubble = {
   },
 
   move(x, y) {
+    this._ensureAttached();
     if (!this.element) return;
 
     const bubbleWidth = 300;
@@ -212,6 +283,13 @@ export function getInitScript(personaName: string): string {
  */
 export function getShowScript(thought: string, x: number, y: number): string {
   return `window.__abraSpeechBubble.show(${JSON.stringify(thought)}, ${x}, ${y})`;
+}
+
+/**
+ * Get the script to show a "thinking..." animation at a specific position
+ */
+export function getShowThinkingScript(x: number, y: number): string {
+  return `window.__abraSpeechBubble.showThinking(${x}, ${y})`;
 }
 
 /**

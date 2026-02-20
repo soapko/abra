@@ -31,6 +31,8 @@ export interface Action {
   elementId?: number;
   // Selector to use
   selector?: string;
+  // Label to match by visible text (for elements not yet visible — resolved at execution time)
+  label?: string;
   // Target element ID (for drag action)
   targetElementId?: number;
   // Target selector (for drag action)
@@ -104,6 +106,7 @@ Your response MUST be valid JSON with this exact structure:
     {
       "type": "click|type|press|scroll|hover|drag|wait|done|failed",
       "elementId": <number if clicking/typing/hovering/dragging on an element>,
+      "label": "<visible text to match — for elements not yet visible>",
       "selector": "<selector string if needed>",
       "targetElementId": <number of target element for drag>,
       "targetSelector": "<target selector for drag>",
@@ -118,24 +121,38 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING — IMPORTANT:
-You SHOULD return multiple actions whenever the next steps are predictable.
-Each sensing cycle (screenshot + LLM call) is expensive — 5-15 seconds.
+ACTION BATCHING — CRITICAL FOR PERFORMANCE:
+You MUST return multiple actions whenever the next steps are predictable.
+Each sensing cycle (page analysis + LLM call) is expensive — 5-15 seconds.
 Batching saves enormous time. The system will automatically bail out if
 something unexpected happens, so err on the side of batching more.
 
 ALWAYS batch these patterns (2-5 actions):
 - Form filling: click field + type text + press Tab/Enter
 - Search: click search box + type query + press Enter
-- Dropdown: click dropdown + click the option you want
+- Dropdown: click dropdown + click the option you want (use "label" for the option)
 - Menu navigation: click menu item + click sub-item
 - Settings: click toggle/checkbox + click another toggle/checkbox
 - Multi-step UI: click button + fill field + click submit
+- Dismissing modals + next action: click dismiss + click target element
 
 Only use a SINGLE action when:
-- You genuinely don't know what will appear (first page load, after navigation)
+- You genuinely don't know what will appear (first visit, no domain knowledge)
 - The action causes navigation to a new page (link click, form submit to new URL)
-- You need to READ what appeared before deciding (opened an unfamiliar dialog)
+
+LABEL-BASED TARGETING:
+When you know (from domain knowledge or experience) that an element WILL appear after
+a preceding action but isn't visible yet, use "label" instead of "elementId":
+  {"type": "click", "label": "Purple"}
+The system will wait for the element to appear and click it by matching visible text.
+Use this for dropdown options, menu items, and dialog buttons that appear after interaction.
+
+DOMAIN KNOWLEDGE:
+If a "DOMAIN KNOWLEDGE" section is present in the prompt, it contains observations from
+previous visits — but only what has been explored so far, not everything available on the page.
+Use it to plan multi-step batches when helpful, but feel free to explore beyond what's recorded.
+For example, if knowledge says clicking "Theme" reveals options including "Purple", you can batch:
+  [{"type": "click", "elementId": 33}, {"type": "click", "label": "Purple"}]
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -170,7 +187,7 @@ Rules:
 - Think as the persona would, using their perspective and priorities
 - Be specific about which element to interact with using elementId
 - Keep thoughts natural and conversational
-- PREFER batching multiple actions over single actions — be efficient`;
+- ALWAYS batch multiple actions when you have domain knowledge or can see all needed elements`;
 }
 
 /**
@@ -182,13 +199,22 @@ function buildUserPrompt(
   previousActions: string[],
   documentIndex?: string,
   lastReadContent?: string | null,
-  lastActionFeedback?: string | null
+  lastActionFeedback?: string | null,
+  domainKnowledge?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
-    '',
-    formatPageStateForLLM(pageState),
   ];
+
+  // Domain knowledge BEFORE page elements — so LLM reads it first and can plan ahead
+  if (domainKnowledge) {
+    parts.push('');
+    parts.push('DOMAIN KNOWLEDGE:');
+    parts.push(domainKnowledge);
+  }
+
+  parts.push('');
+  parts.push(formatPageStateForLLM(pageState));
 
   // Add available documents
   if (documentIndex) {
@@ -269,7 +295,7 @@ export async function invokeClaudeCLI(
     // Combine into a single prompt for simplicity
     const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
 
-    const args = ['--print'];
+    const args = ['--print', '--model', 'claude-haiku-4-5-20251001'];
     if (sessionId) {
       if (isNewSession) {
         // First call for this session - create it
@@ -396,10 +422,11 @@ export async function getNextAction(
   documentIndex?: string,
   lastReadContent?: string | null,
   sessionId?: string,
-  lastActionFeedback?: string | null
+  lastActionFeedback?: string | null,
+  domainKnowledge?: string | null
 ): Promise<BatchThinkingResult> {
   const systemPrompt = buildSystemPrompt(persona);
-  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback);
+  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback, domainKnowledge);
 
   debug('Getting next action for goal:', goal);
   debug('Page has %d elements', pageState.elements.length);
@@ -434,6 +461,7 @@ Your response MUST be valid JSON with this exact structure:
     {
       "type": "click|type|press|scroll|hover|drag|wait|done|failed",
       "elementId": <the number from the red label, e.g. 5 for [5]>,
+      "label": "<visible text to match — for elements not yet visible>",
       "x": <pixel x coordinate for coordinate fallback click>,
       "y": <pixel y coordinate for coordinate fallback click>,
       "targetElementId": <number of target element for drag>,
@@ -452,8 +480,8 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING — IMPORTANT:
-You SHOULD return multiple actions whenever the next steps are predictable.
+ACTION BATCHING — CRITICAL FOR PERFORMANCE:
+You MUST return multiple actions whenever the next steps are predictable.
 Each sensing cycle (screenshot + LLM call) is expensive — 5-15 seconds.
 Batching saves enormous time. The system will automatically bail out if
 something unexpected happens, so err on the side of batching more.
@@ -461,16 +489,30 @@ something unexpected happens, so err on the side of batching more.
 ALWAYS batch these patterns (2-5 actions):
 - Form filling: click field + type text + press Tab/Enter
 - Search: click search box + type query + press Enter
-- Dropdown: click dropdown + click the option you want
+- Dropdown: click dropdown + click the option you want (use "label" for the option)
 - Menu navigation: click menu item + click sub-item
 - Settings: click toggle/checkbox + click another toggle/checkbox
 - Multi-step UI: click button + fill field + click submit
-- Theme customizer: click color category + click color swatch
+- Theme customizer: click color category + click color swatch (use "label")
+- Dismissing modals + next action: click dismiss + click target element
 
 Only use a SINGLE action when:
-- You genuinely don't know what will appear (first page load, after navigation)
+- You genuinely don't know what will appear (first visit, no domain knowledge)
 - The action causes navigation to a new page (link click, form submit to new URL)
-- You need to READ what appeared before deciding (opened an unfamiliar dialog)
+
+LABEL-BASED TARGETING:
+When you know (from domain knowledge or experience) that an element WILL appear after
+a preceding action but isn't visible yet, use "label" instead of "elementId":
+  {"type": "click", "label": "Purple"}
+The system will wait for the element to appear and click it by matching visible text.
+Use this for dropdown options, menu items, and dialog buttons that appear after interaction.
+
+DOMAIN KNOWLEDGE:
+If a "DOMAIN KNOWLEDGE" section is present in the prompt, it contains observations from
+previous visits — but only what has been explored so far, not everything available on the page.
+Use it to plan multi-step batches when helpful, but feel free to explore beyond what's recorded.
+For example, if knowledge says clicking "Theme" reveals options including "Purple", you can batch:
+  [{"type": "click", "elementId": 33}, {"type": "click", "label": "Purple"}]
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -513,7 +555,7 @@ Rules:
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
 - For typing: first click the input field, then type in a separate action
-- PREFER batching multiple actions over single actions — be efficient. If you can see the elements you need to interact with, batch the clicks together`;
+- ALWAYS batch multiple actions when you have domain knowledge or can see all needed elements`;
 }
 
 /**
@@ -525,15 +567,24 @@ function buildVisionUserPrompt(
   previousActions: string[],
   documentIndex?: string,
   lastReadContent?: string | null,
-  lastActionFeedback?: string | null
+  lastActionFeedback?: string | null,
+  domainKnowledge?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
-    '',
-    'Look at the annotated screenshot. Elements are marked with red boxes and [number] labels.',
-    '',
-    elementLegend,
   ];
+
+  // Domain knowledge BEFORE element legend — so LLM reads it first
+  if (domainKnowledge) {
+    parts.push('');
+    parts.push('DOMAIN KNOWLEDGE:');
+    parts.push(domainKnowledge);
+  }
+
+  parts.push('');
+  parts.push('Look at the annotated screenshot. Elements are marked with red boxes and [number] labels.');
+  parts.push('');
+  parts.push(elementLegend);
 
   // Add available documents
   if (documentIndex) {
@@ -721,7 +772,7 @@ export async function invokeClaudeCLIWithVision(
 
     const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}\n\nLook at the screenshot at: ${screenshotPath}`;
 
-    const args = ['--print', '--dangerously-skip-permissions'];
+    const args = ['--print', '--model', 'claude-haiku-4-5-20251001', '--dangerously-skip-permissions'];
     if (sessionId) {
       if (isNewSession) {
         args.push('--session-id', sessionId);
@@ -780,10 +831,11 @@ export async function getNextActionFromScreenshot(
   documentIndex?: string,
   lastReadContent?: string | null,
   sessionId?: string,
-  lastActionFeedback?: string | null
+  lastActionFeedback?: string | null,
+  domainKnowledge?: string | null
 ): Promise<VisionBatchThinkingResult> {
   const systemPrompt = buildVisionSystemPrompt(persona);
-  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback);
+  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback, domainKnowledge);
 
   debug('Getting next action from screenshot for goal:', goal);
 
@@ -806,6 +858,7 @@ export async function getNextActionFromScreenshot(
 export function formatAction(action: Action): string {
   switch (action.type) {
     case 'click':
+      if (action.label) return `Clicked by label "${action.label}"`;
       return `Clicked element ${action.elementId} (${action.selector})`;
     case 'type':
       return `Typed "${action.text}" into element ${action.elementId}`;
@@ -836,6 +889,7 @@ export function formatVisionAction(action: VisionAction): string {
 
   switch (action.type) {
     case 'click':
+      if (action.label) return `[sight] Click by label "${action.label}"`;
       return `[sight] Clicked${elemRef}`;
     case 'type':
       return `[sight] Typed "${action.text}" into${elemRef}`;
@@ -891,7 +945,7 @@ export function formatBatchFeedback(
   if (results.length === 1) {
     const r = results[0];
     return r.success
-      ? `SUCCESS: "${r.actionDesc}" completed. TIP: You can batch multiple actions in one response to be faster — the system will bail out safely if anything unexpected happens.`
+      ? `SUCCESS: "${r.actionDesc}" completed.`
       : `FAILED: "${r.actionDesc}" failed with error: ${r.error}. Try a different approach.`;
   }
 

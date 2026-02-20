@@ -172,6 +172,18 @@ program
               // Mouse for coordinate-based clicking (fallback when selectors fail)
               mouse: {
                 click: async (x: number, y: number) => {
+                  // Move visual cursor to click position (so it shows in video)
+                  await browser.evaluate(`
+                    (function() {
+                      if (typeof window.__puppetMoveCursor__ === 'function') {
+                        window.__puppetMoveCursor__(${x}, ${y});
+                      }
+                      if (typeof window.__puppetClickEffect__ === 'function') {
+                        window.__puppetClickEffect__(${x}, ${y});
+                      }
+                    })()
+                  `);
+
                   // Use native pointer events with shadow DOM piercing
                   const result = await browser.evaluate(`
                     (function() {

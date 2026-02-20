@@ -59,7 +59,7 @@ function isRecoverableClickError(errorMsg: string): boolean {
 }
 
 /**
- * Try clicking with selector, fallback to coordinates if selector fails
+ * Try clicking with selector, fallback to direct JS click, then coordinates
  */
 async function tryClickWithFallback(
   browser: Browser,
@@ -72,14 +72,49 @@ async function tryClickWithFallback(
     const errorMsg = err instanceof Error ? err.message : String(err);
     debug('Click with selector failed: %s', errorMsg.slice(0, 150));
 
-    // Check if we can recover by clicking at coordinates
     const canRecover = isRecoverableClickError(errorMsg);
+    if (!canRecover) {
+      debug('Cannot recover, rethrowing error');
+      throw err;
+    }
+
+    // First try: direct JS click on the element (bypasses visual obstruction)
+    const escapedSelector = JSON.stringify(selector);
+    try {
+      debug('Trying direct JS click on %s', selector);
+      const jsResult = await browser.evaluate(`
+        (function() {
+          var el = document.querySelector(${escapedSelector});
+          if (!el) return { success: false, reason: 'not found' };
+          // Dispatch pointer events first (Radix UI uses pointerdown, not click)
+          var rect = el.getBoundingClientRect();
+          var cx = rect.left + rect.width / 2;
+          var cy = rect.top + rect.height / 2;
+          var opts = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+          return { success: true };
+        })()
+      `) as { success: boolean; reason?: string } | null;
+
+      if (jsResult && jsResult.success) {
+        debug('Direct JS click succeeded');
+        return;
+      }
+      debug('Direct JS click failed: %s', jsResult?.reason);
+    } catch (jsErr) {
+      debug('Direct JS click threw: %s', jsErr instanceof Error ? jsErr.message : String(jsErr));
+    }
+
+    // Second try: coordinate click
     const hasBounds = !!element?.bounds;
     const hasMouse = !!browser.mouse;
+    debug('Recovery check: hasBounds=%s, hasMouse=%s', hasBounds, hasMouse);
 
-    debug('Recovery check: canRecover=%s, hasBounds=%s, hasMouse=%s', canRecover, hasBounds, hasMouse);
-
-    if (canRecover && hasBounds && browser.mouse) {
+    if (hasBounds && browser.mouse) {
       const center = getElementCenter(element!);
       debug('Falling back to coordinate click at (%d, %d)', center.x, center.y);
       await browser.mouse.click(center.x, center.y);
