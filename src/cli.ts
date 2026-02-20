@@ -6,7 +6,7 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
-import ora from 'ora';
+import ora, { type Ora } from 'ora';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readdir, stat, readFile } from 'fs/promises';
@@ -14,6 +14,51 @@ import { loadPersona, validatePersona } from './lib/persona.js';
 import { runSession } from './lib/session.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const isTTY = !!(process.stderr.isTTY);
+
+/**
+ * Create a spinner that falls back to plain console.log in non-TTY environments.
+ * ora v8 disables animation but still prints static lines in non-TTY — use
+ * isSilent to fully suppress, then handle output ourselves.
+ */
+function createSpinner(text: string): Ora {
+  if (!isTTY) {
+    console.log(text);
+    return ora({ text, isSilent: true });
+  }
+  return ora(text).start();
+}
+
+/** Log a spinner success — always prints, even in non-TTY */
+function spinnerSucceed(spinner: Ora, text: string): void {
+  if (isTTY) {
+    spinner.succeed(text);
+  } else {
+    spinner.stop();
+    console.log(`✓ ${text}`);
+  }
+}
+
+/** Log a spinner failure — always prints, even in non-TTY */
+function spinnerFail(spinner: Ora, text: string): void {
+  if (isTTY) {
+    spinner.fail(text);
+  } else {
+    spinner.stop();
+    console.error(`✗ ${text}`);
+  }
+}
+
+/** Log a spinner info — always prints, even in non-TTY */
+function spinnerInfo(spinner: Ora, text: string): void {
+  if (isTTY) {
+    spinner.info(text);
+  } else {
+    spinner.stop();
+    console.log(`ℹ ${text}`);
+  }
+}
 
 const program = new Command();
 
@@ -31,15 +76,17 @@ program
   .option('-o, --output <dir>', 'Output directory for session files', './sessions')
   .option('--headless', 'Run browser in headless mode')
   .option('--sight-mode', 'Use screenshots for decision-making instead of HTML analysis')
+  .option('--observe', 'Enable observer agent for concurrent page documentation')
   .option('--goals <indices>', 'Run only specific goals (comma-separated, 1-indexed)')
-  .action(async (personaFile: string, options: { output: string; headless?: boolean; sightMode?: boolean; goals?: string }) => {
-    const spinner = ora('Loading persona configuration...').start();
+  .option('--no-learn', 'Disable domain knowledge recording and assertions')
+  .action(async (personaFile: string, options: { output: string; headless?: boolean; sightMode?: boolean; observe?: boolean; goals?: string; learn?: boolean }) => {
+    const spinner = createSpinner('Loading persona configuration...');
 
     try {
       // Load persona
       const personaPath = resolve(personaFile);
       const persona = await loadPersona(personaPath);
-      spinner.succeed(`Loaded persona: ${chalk.cyan(persona.persona.name)}`);
+      spinnerSucceed(spinner, `Loaded persona: ${chalk.cyan(persona.persona.name)}`);
 
       // Filter goals if specified
       if (options.goals) {
@@ -71,8 +118,13 @@ program
         console.log(chalk.cyan('Sight mode enabled - using screenshots for decision-making'));
       }
 
+      // Log observer mode if enabled
+      if (options.observe) {
+        console.log(chalk.cyan('Observer mode enabled - concurrent page documentation'));
+      }
+
       // Run session
-      const sessionSpinner = ora('Running simulation...').start();
+      const sessionSpinner = createSpinner('Running simulation...');
 
       const result = await runSession(
         async (browserOptions) => {
@@ -87,6 +139,9 @@ program
               click: (s: string) => browser.click(s),
               type: (s: string, t: string) => browser.type(s, t),
               hover: (s: string) => browser.hover(s),
+              drag: (source: string, target: string) => browser.drag(source, target),
+              dragCoordinates: (sourceX: number, sourceY: number, targetX: number, targetY: number) =>
+                browser.dragCoordinates(sourceX, sourceY, targetX, targetY),
               scroll: (d: 'up' | 'down', a?: number) => browser.scroll(d, a),
               wait: (ms: number) => browser.wait(ms),
               waitForLoaded: (timeout?: number) => browser.waitForLoaded(timeout),
@@ -203,16 +258,35 @@ program
           outputDir: resolve(options.output),
           headless: options.headless,
           sightMode: options.sightMode,
+          observe: options.observe,
+          learn: options.learn,
           onThought: (thought, goalIndex) => {
-            sessionSpinner.text = `Goal ${goalIndex + 1}: ${thought.slice(0, 60)}...`;
+            const msg = `Goal ${goalIndex + 1}: ${thought.slice(0, 60)}...`;
+            if (isTTY) {
+              sessionSpinner.text = msg;
+            } else {
+              console.log(chalk.dim(`[thought] ${msg}`));
+            }
           },
           onAction: (action, goalIndex) => {
-            sessionSpinner.text = `Goal ${goalIndex + 1}: ${action}`;
+            const msg = `Goal ${goalIndex + 1}: ${action}`;
+            if (isTTY) {
+              sessionSpinner.text = msg;
+            } else {
+              console.log(chalk.dim(`[action]  ${msg}`));
+            }
+          },
+          onObservation: (observation, goalIndex) => {
+            if (isTTY) {
+              sessionSpinner.suffixText = chalk.dim(`[observer] ${observation.slice(0, 50)}`);
+            } else {
+              console.log(chalk.dim(`[observer] Goal ${goalIndex + 1}: ${observation.slice(0, 80)}`));
+            }
           },
         }
       );
 
-      sessionSpinner.succeed('Simulation complete!');
+      spinnerSucceed(sessionSpinner, 'Simulation complete!');
       console.log();
 
       // Print results
@@ -238,7 +312,7 @@ program
       console.log();
       console.log(chalk.dim(`Session saved to: ${options.output}`));
     } catch (err) {
-      spinner.fail('Error');
+      spinnerFail(spinner, 'Error');
       console.error(chalk.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }
@@ -251,13 +325,13 @@ program
   .command('validate <persona-file>')
   .description('Validate a persona configuration file')
   .action(async (personaFile: string) => {
-    const spinner = ora('Validating persona configuration...').start();
+    const spinner = createSpinner('Validating persona configuration...');
 
     try {
       const personaPath = resolve(personaFile);
       const persona = await loadPersona(personaPath);
 
-      spinner.succeed('Persona configuration is valid');
+      spinnerSucceed(spinner, 'Persona configuration is valid');
       console.log();
       console.log(chalk.bold('Persona:'), persona.persona.name);
       console.log(chalk.bold('URL:'), persona.url);
@@ -267,7 +341,7 @@ program
       console.log(chalk.bold('Timeout:'), `${persona.options.timeout / 1000}s`);
       console.log(chalk.bold('Thinking speed:'), persona.options.thinkingSpeed);
     } catch (err) {
-      spinner.fail('Validation failed');
+      spinnerFail(spinner, 'Validation failed');
       console.error(chalk.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }
@@ -281,7 +355,7 @@ program
   .description('List past sessions')
   .option('-d, --dir <dir>', 'Sessions directory', './sessions')
   .action(async (options: { dir: string }) => {
-    const spinner = ora('Loading sessions...').start();
+    const spinner = createSpinner('Loading sessions...');
 
     try {
       const sessionsDir = resolve(options.dir);
@@ -290,7 +364,7 @@ program
       try {
         entries = await readdir(sessionsDir);
       } catch {
-        spinner.info('No sessions found');
+        spinnerInfo(spinner, 'No sessions found');
         return;
       }
 
@@ -317,7 +391,7 @@ program
         }
       }
 
-      spinner.stop();
+      spinnerSucceed(spinner, 'Sessions loaded');
 
       if (sessions.length === 0) {
         console.log(chalk.dim('No sessions found'));
@@ -342,7 +416,7 @@ program
         console.log(chalk.dim(`  ${session.date.toLocaleString()} | Goals: ${statusColor(`${session.completed}/${session.goals}`)} (${successRate}%)`));
       }
     } catch (err) {
-      spinner.fail('Error');
+      spinnerFail(spinner, 'Error');
       console.error(chalk.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }

@@ -14,6 +14,8 @@ export interface Browser {
   click(selector: string): Promise<void>;
   type(selector: string, text: string): Promise<void>;
   hover(selector: string): Promise<void>;
+  drag(sourceSelector: string, targetSelector: string): Promise<void>;
+  dragCoordinates(sourceX: number, sourceY: number, targetX: number, targetY: number): Promise<void>;
   scroll(direction: 'up' | 'down', amount?: number): Promise<void>;
   wait(ms: number): Promise<void>;
   waitForLoaded(timeout?: number): Promise<void>;
@@ -121,6 +123,35 @@ export async function executeAction(
 
         debug('Clicking:', selector);
         await tryClickWithFallback(browser, selector, element);
+        break;
+      }
+
+      case 'drag': {
+        // Coordinate-based drag (for captchas and elements not in the DOM tree)
+        if (action.sourceX !== undefined && action.sourceY !== undefined &&
+            action.targetX !== undefined && action.targetY !== undefined) {
+          debug('Coordinate drag: (%d,%d) → (%d,%d)', action.sourceX, action.sourceY, action.targetX, action.targetY);
+          await browser.dragCoordinates(action.sourceX, action.sourceY, action.targetX, action.targetY);
+          break;
+        }
+
+        // Selector-based drag
+        const sourceElement = action.elementId !== undefined
+          ? findElement(elements, action.elementId)
+          : null;
+        const targetElement = action.targetElementId !== undefined
+          ? findElement(elements, action.targetElementId)
+          : null;
+
+        const sourceSelector = sourceElement?.selector || action.selector;
+        const targetSelector = targetElement?.selector || action.targetSelector;
+
+        if (!sourceSelector || !targetSelector) {
+          throw new Error('Need both source and target selectors (or sourceX/Y + targetX/Y coordinates) for drag action');
+        }
+
+        debug('Dragging: %s → %s', sourceSelector, targetSelector);
+        await browser.drag(sourceSelector, targetSelector);
         break;
       }
 

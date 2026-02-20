@@ -13,15 +13,18 @@ Abra is an automated user-testing platform that simulates personas interacting w
 
 ```
 src/
-├── cli.ts              # CLI entry point (run, validate, sessions commands)
-├── index.ts            # Public API exports
+├── cli.ts                # CLI entry point (run, validate, sessions commands)
+├── index.ts              # Public API exports
 └── lib/
-    ├── persona.ts      # Persona config schema and loader (zod validation)
-    ├── page-analyzer.ts # Extract interactive elements from pages
-    ├── llm.ts          # Claude CLI integration for persona thinking
-    ├── speech-bubble.ts # Inject speech bubble overlay into pages
+    ├── persona.ts        # Persona config schema and loader (zod validation)
+    ├── page-analyzer.ts  # Extract interactive elements from pages
+    ├── llm.ts            # Claude CLI integration for persona thinking
+    ├── speech-bubble.ts  # Inject speech bubble overlay into pages
     ├── action-executor.ts # Map LLM decisions to puppet commands
-    └── session.ts      # Main orchestrator loop
+    ├── session.ts        # Main orchestrator loop
+    ├── dom-settle.ts     # Adaptive DOM settle detection (MutationObserver)
+    ├── state-observer.ts # DOM state delta capture for learning
+    └── domain-knowledge.ts # Persistent domain knowledge store
 ```
 
 ## Key Components
@@ -39,8 +42,9 @@ src/
 ### LLM Integration
 - Uses Claude CLI via child_process spawn
 - Builds prompts with persona context + page state + goal
-- Returns structured JSON: thought + action + confidence
-- Supports actions: click, type, scroll, hover, wait, done, failed
+- Returns structured JSON: thought + actions[] + confidence (batch format)
+- Supports actions: click, type, press, scroll, hover, drag, wait, done, failed, document
+- Backward compatible: parser accepts both single `action` and batch `actions` format
 
 ### Speech Bubble
 - CSS/JS injected into page via evaluate()
@@ -49,10 +53,29 @@ src/
 - Auto-positions to stay on screen
 
 ### Session Orchestrator
-- Main loop: analyze → think → show bubble → execute → repeat
+- Main loop: analyze → think → show bubble → execute batch → repeat
+- Batch execution: LLM can return multiple actions per cycle, executed in sequence
+- Bail-out checks between batch actions: failure, URL change, missing target, assertion mismatch
 - Video recording per goal
 - Saves transcripts and session metadata
 - Handles timeouts and action limits
+
+### Adaptive DOM Settle Detection
+- `waitForDOMSettle()` replaces fixed `waitForLoaded(2000)` for post-action settling
+- MutationObserver-based: resolves when DOM stops changing (100ms quiet period)
+- Hard cap at 2s prevents infinite waits on chatty sites
+- Fast pages settle in ~20ms, framework re-renders in ~100-150ms, API loads in ~500ms-2s
+- Navigation-safe: try/catch around evaluate() handles page transitions
+
+### Domain Knowledge & Learned Assertions
+- Observes DOM state deltas after each action (focus, aria changes, visibility, URL)
+- Records transitions per domain in `~/.abra/domains/` as JSONL files
+- On repeat visits, asserts expected outcomes — bails to re-sensing on mismatch
+- Piecemeal learning: only updates the specific transition that changed
+- Cold start = current behavior; gets faster with each visit
+- Similarity matching: additive noise ignored, only missing expected changes trigger bail
+- `--no-learn` CLI flag disables knowledge recording and assertions
+- Append-only per-session log files prevent concurrent write conflicts
 
 ### Shadow DOM Click Support
 - `deepElementFromPoint(x, y)` pierces shadow DOM to find actual element
@@ -73,6 +96,11 @@ src/
 ## CLI Commands
 
 - `abra run <persona.yaml>` - Run simulation
+  - `--sight-mode` - Use screenshots for decision-making
+  - `--observe` - Enable observer agent for concurrent documentation
+  - `--no-learn` - Disable domain knowledge recording and assertions
+  - `--goals <indices>` - Run specific goals only
+  - `--headless` - Run browser in headless mode
 - `abra validate <persona.yaml>` - Validate config
 - `abra sessions` - List past sessions
 

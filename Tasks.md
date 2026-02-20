@@ -111,12 +111,41 @@
 
 ## 010.research
 
-- [ ] **Task 16: Evaluate Abra vs Puppet for automated testing** -> [010.research.01-abra-vs-puppet-testing.md](docs/tasks/010.research.01-abra-vs-puppet-testing.md)
+- [✅] **Task 16: Evaluate Abra vs Puppet for automated testing** -> [010.research.01-abra-vs-puppet-testing.md](docs/tasks/010.research.01-abra-vs-puppet-testing.md)
   - Compare reliability, test creation effort, coverage, speed
   - Identify good vs poor fit use cases
   - Propose hybrid testing strategy
   - Answer key questions about determinism and cost
   - Prototype Abra → Puppet test script generation
+
+## 013.core
+
+- [✅] **Task 19: Adaptive DOM settle detection** -> [013.core.01-dom-settle-detection.md](docs/tasks/013.core.01-dom-settle-detection.md)
+  - Replace fixed `waitForLoaded(2000)` with MutationObserver-based `waitForDOMSettle()`
+  - Resolves when DOM stops changing (100ms quiet period), hard cap at 2s
+  - Fast pages go fast (~20ms), slow pages get patience (~500ms-2s)
+  - Worst case matches current behavior (chatty sites hit 2s cap)
+  - Foundation for Task 17 (inter-action timing) and Task 18 (shared observer)
+
+## 011.features
+
+- [✅] **Task 17: Batch action execution** -> [011.features.01-batch-action-execution.md](docs/tasks/011.features.01-batch-action-execution.md)
+  - LLM returns `actions: [...]` (array) instead of single action per cycle
+  - Execute in rapid sequence with lightweight bail-out checks between each
+  - Bail triggers: action failure, URL change, target element missing, terminal action
+  - Backward compatible: parser accepts both old and new format
+  - Reduces LLM round-trips for predictable multi-step interactions
+  - **Depends on:** 013.core.01 (Adaptive DOM Settle Detection)
+
+## 012.features
+
+- [✅] **Task 18: Domain knowledge & learned assertions** -> [012.features.01-domain-knowledge-learned-assertions.md](docs/tasks/012.features.01-domain-knowledge-learned-assertions.md)
+  - Observe and record state deltas (DOM changes) after each action
+  - On repeat visits, use recorded observations as assertions for faster execution
+  - Optimistic execution: trust knowledge, correct on contact when assertions fail
+  - Piecemeal learning: only update the specific transitions that changed
+  - Cold start = current behavior; gets faster with each visit to a domain
+  - **Depends on:** 013.core.01 (DOM Settle Detection), 011.features.01 (Batch Action Execution)
 
 ---
 

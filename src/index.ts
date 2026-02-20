@@ -29,10 +29,14 @@ export {
 export {
   getNextAction,
   formatAction,
+  formatBatchFeedback,
+  normalizeToBatch,
   type Action,
   type ActionType,
   type DocumentOperation,
   type ThinkingResult,
+  type BatchThinkingResult,
+  type VisionBatchThinkingResult,
 } from './lib/llm.js';
 
 // Document writing
@@ -60,6 +64,43 @@ export {
   getMoveScript,
   getDestroyScript,
 } from './lib/speech-bubble.js';
+
+// Page content extraction (for observer)
+export {
+  PAGE_CONTENT_SCRIPT,
+  formatPageContentForLLM,
+  type PageContent,
+} from './lib/page-content-extractor.js';
+
+// Observer LLM
+export {
+  getObserverAction,
+  type ObserverResult,
+} from './lib/observer-llm.js';
+
+// DOM settle detection
+export {
+  waitForDOMSettle,
+  type DOMSettleOptions,
+} from './lib/dom-settle.js';
+
+// State observation
+export {
+  installObserver,
+  collectObservation,
+  teardownObserver,
+  type ElementSignature,
+  type StateDelta,
+} from './lib/state-observer.js';
+
+// Domain knowledge
+export {
+  DomainKnowledgeStore,
+  assertDeltaMatch,
+  buildActionSignature,
+  type ActionSignature,
+  type TransitionRecord,
+} from './lib/domain-knowledge.js';
 
 // Session orchestration
 export {

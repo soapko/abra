@@ -13,23 +13,33 @@ const debug = createDebug('abra:llm');
 // Claude CLI paths to try
 const CLAUDE_PATHS = [
   process.env.CLAUDE_CLI_PATH,
-  '/Users/karl/.claude/local/claude', // Common macOS location
+  `${process.env.HOME}/.local/bin/claude`,
   `${process.env.HOME}/.claude/local/claude`,
+  '/Users/karl/.claude/local/claude', // Common macOS location
   'claude', // Let PATH resolve it
 ].filter(Boolean) as string[];
 
 // Action types the LLM can request
-export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'wait' | 'done' | 'failed' | 'document';
+export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'drag' | 'wait' | 'done' | 'failed' | 'document';
 
 // Document operations for the document action type
 export type DocumentOperation = 'create' | 'read' | 'update' | 'append';
 
 export interface Action {
   type: ActionType;
-  // Element ID from page analysis (for click, type, hover)
+  // Element ID from page analysis (for click, type, hover, drag source)
   elementId?: number;
   // Selector to use
   selector?: string;
+  // Target element ID (for drag action)
+  targetElementId?: number;
+  // Target selector (for drag action)
+  targetSelector?: string;
+  // Coordinate-based drag (when no elements are available, e.g. captchas)
+  sourceX?: number;
+  sourceY?: number;
+  targetX?: number;
+  targetY?: number;
   // Text to type (for type action)
   text?: string;
   // Key to press (for press action): Enter, Escape, Tab, ArrowDown, ArrowUp, etc.
@@ -60,6 +70,15 @@ export interface ThinkingResult {
   confidence: number;
 }
 
+export interface BatchThinkingResult {
+  thought: string;
+  actions: Action[];
+  confidence: number;
+}
+
+/** Max actions per batch (defensive cap) */
+const MAX_BATCH_SIZE = 8;
+
 /**
  * Build the system prompt for the persona
  */
@@ -81,18 +100,33 @@ You are browsing a website to achieve specific goals. For each step:
 Your response MUST be valid JSON with this exact structure:
 {
   "thought": "Your internal monologue as this persona (1-2 sentences, first person)",
-  "action": {
-    "type": "click|type|scroll|hover|wait|done|failed",
-    "elementId": <number if clicking/typing/hovering on an element>,
-    "selector": "<selector string if needed>",
-    "text": "<text to type if type action>",
-    "direction": "up|down (if scroll)",
-    "amount": <pixels to scroll>,
-    "duration": <ms to wait>,
-    "reason": "<why done or failed>"
-  },
+  "actions": [
+    {
+      "type": "click|type|press|scroll|hover|drag|wait|done|failed",
+      "elementId": <number if clicking/typing/hovering/dragging on an element>,
+      "selector": "<selector string if needed>",
+      "targetElementId": <number of target element for drag>,
+      "targetSelector": "<target selector for drag>",
+      "text": "<text to type if type action>",
+      "key": "<key to press>",
+      "direction": "up|down (if scroll)",
+      "amount": <pixels to scroll>,
+      "duration": <ms to wait>,
+      "reason": "<why done or failed>"
+    }
+  ],
   "confidence": <0.0 to 1.0>
 }
+
+ACTION BATCHING:
+You may include MULTIPLE actions when confident they can execute in rapid
+sequence WITHOUT needing to re-read the page. Keep batches SHORT (2-4 actions).
+Use a single action when uncertain what happens next.
+
+Good batches: click search field + type query + press Enter. Click dropdown + click visible option.
+Bad batches: click a link (causes navigation), submit a form (unknown result page).
+
+"done" and "failed" must ALWAYS be the LAST action in the array.
 
 DOCUMENT ACTIONS:
 You can create and maintain documents to record your findings, notes, and journey.
@@ -112,6 +146,12 @@ Use the "document" action type with these operations:
 
 Formats: .md (Markdown), .json (JSON), .txt (plain text), or any custom extension.
 Document when your goal mentions: document, record, note, track, log, compare, write down.
+
+DRAG ACTION:
+Use "drag" when you need to click-and-drag an element to another location. This is useful for:
+- Captcha/verification puzzles that require dragging a slider or aligning objects
+- Sortable lists, kanban boards, drag-and-drop interfaces
+Specify elementId for the source (what to grab) and targetElementId for the destination (where to drop).
 
 Rules:
 - Use "done" when you believe the goal has been achieved
@@ -200,7 +240,7 @@ const createdSessions = new Set<string>();
 /**
  * Invoke Claude CLI and get a response
  */
-async function invokeClaudeCLI(
+export async function invokeClaudeCLI(
   systemPrompt: string,
   userPrompt: string,
   sessionId?: string
@@ -233,7 +273,7 @@ async function invokeClaudeCLI(
 
     const proc = spawn(claudePath!, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, CLAUDECODE: undefined },
     });
 
     let stdout = '';
@@ -268,33 +308,64 @@ async function invokeClaudeCLI(
 }
 
 /**
- * Parse LLM response to extract action
+ * Truncate actions array after a document.read action.
+ * Read content isn't available to the LLM until the next cycle,
+ * so any non-terminal actions after a read are invalid.
  */
-function parseResponse(response: string): ThinkingResult {
-  // Try to extract JSON from the response
-  // The response might have extra text around it
-  const jsonMatch = response.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
+function truncateAfterDocumentRead(actions: Action[]): Action[] {
+  for (let i = 0; i < actions.length; i++) {
+    if (actions[i].type === 'document' && actions[i].document?.operation === 'read') {
+      return actions.slice(0, i + 1);
+    }
+  }
+  return actions;
+}
+
+/**
+ * Parse LLM response to extract actions (supports both single and batch format)
+ */
+function parseResponse(response: string): BatchThinkingResult {
+  const jsonStr = extractFirstJson(response);
+  if (!jsonStr) {
     throw new Error('No JSON found in LLM response');
   }
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(jsonStr);
 
-    // Validate required fields
     if (!parsed.thought || typeof parsed.thought !== 'string') {
       throw new Error('Missing or invalid thought field');
     }
-    if (!parsed.action || typeof parsed.action !== 'object') {
-      throw new Error('Missing or invalid action field');
+
+    // Accept either 'actions' (array) or 'action' (single) for backward compatibility
+    let actions: Action[];
+    if (parsed.actions) {
+      actions = Array.isArray(parsed.actions) ? parsed.actions : [parsed.actions];
+    } else if (parsed.action && typeof parsed.action === 'object') {
+      actions = [parsed.action];
+    } else {
+      throw new Error('Missing action or actions field');
     }
-    if (!parsed.action.type) {
-      throw new Error('Missing action type');
+
+    // Validate each action has a type
+    for (const action of actions) {
+      if (!action.type) {
+        throw new Error('Action missing type field');
+      }
     }
+
+    // Cap batch size
+    if (actions.length > MAX_BATCH_SIZE) {
+      debug('Batch size %d exceeds max %d, truncating', actions.length, MAX_BATCH_SIZE);
+      actions = actions.slice(0, MAX_BATCH_SIZE);
+    }
+
+    // Truncate after document.read
+    actions = truncateAfterDocumentRead(actions);
 
     return {
       thought: parsed.thought,
-      action: parsed.action,
+      actions,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
     };
   } catch (err) {
@@ -314,7 +385,7 @@ export async function getNextAction(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null
-): Promise<ThinkingResult> {
+): Promise<BatchThinkingResult> {
   const systemPrompt = buildSystemPrompt(persona);
   const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback);
 
@@ -347,18 +418,35 @@ IMPORTANT: Use the element numbers from the annotations to specify which element
 Your response MUST be valid JSON with this exact structure:
 {
   "thought": "Your internal monologue as this persona (1-2 sentences, first person)",
-  "action": {
-    "type": "click|type|press|scroll|hover|wait|done|failed",
-    "elementId": <the number from the red label, e.g. 5 for [5]>,
-    "text": "<text to type if type action>",
-    "key": "<key to press: Enter, Escape, Tab, ArrowDown, ArrowUp>",
-    "direction": "up|down (if scroll)",
-    "amount": <pixels to scroll>,
-    "duration": <ms to wait>,
-    "reason": "<why done or failed>"
-  },
+  "actions": [
+    {
+      "type": "click|type|press|scroll|hover|drag|wait|done|failed",
+      "elementId": <the number from the red label, e.g. 5 for [5]>,
+      "targetElementId": <number of target element for drag>,
+      "sourceX": <pixel x for coordinate-based drag>,
+      "sourceY": <pixel y for coordinate-based drag>,
+      "targetX": <pixel x destination for coordinate-based drag>,
+      "targetY": <pixel y destination for coordinate-based drag>,
+      "text": "<text to type if type action>",
+      "key": "<key to press: Enter, Escape, Tab, ArrowDown, ArrowUp>",
+      "direction": "up|down (if scroll)",
+      "amount": <pixels to scroll>,
+      "duration": <ms to wait>,
+      "reason": "<why done or failed>"
+    }
+  ],
   "confidence": <0.0 to 1.0>
 }
+
+ACTION BATCHING:
+You may include MULTIPLE actions when confident they can execute in rapid
+sequence WITHOUT needing to re-read the page. Keep batches SHORT (2-4 actions).
+Use a single action when uncertain what happens next.
+
+Good batches: click search field + type query + press Enter. Click dropdown + click visible option.
+Bad batches: click a link (causes navigation), submit a form (unknown result page).
+
+"done" and "failed" must ALWAYS be the LAST action in the array.
 
 DOCUMENT ACTIONS:
 You can create and maintain documents to record your findings, notes, and journey.
@@ -384,6 +472,9 @@ Rules:
 - The Element Legend below tells you what each [number] refers to - use it to verify you're selecting the right element
 - Look at the visual context to understand the page layout and purpose
 - IMPORTANT: After typing in a search box, ALWAYS press Enter to submit. Do NOT try to click dropdown suggestions - they are inside shadow DOM and clicking them will fail
+- Use "drag" when you need to drag an element to another (captcha sliders, sortable lists, drag-and-drop):
+  - If elements are annotated with [numbers], use elementId (source) and targetElementId (destination)
+  - If NO elements are annotated (e.g. captcha/verification pages), use pixel coordinates: sourceX, sourceY, targetX, targetY based on what you see in the screenshot. Estimate the coordinates from the screenshot dimensions (viewport is typically 1440x900)
 - Use "done" when you believe the goal has been achieved
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
@@ -457,6 +548,12 @@ export interface VisionThinkingResult {
   confidence: number;
 }
 
+export interface VisionBatchThinkingResult {
+  thought: string;
+  actions: VisionAction[];
+  confidence: number;
+}
+
 /**
  * Extract the first valid JSON object from a string
  */
@@ -480,12 +577,11 @@ function extractFirstJson(text: string): string | null {
 }
 
 /**
- * Parse vision LLM response
+ * Parse vision LLM response (supports both single and batch format)
  */
-function parseVisionResponse(response: string): VisionThinkingResult {
+function parseVisionResponse(response: string): VisionBatchThinkingResult {
   debug('Parsing vision response (%d chars)', response.length);
 
-  // Try to extract the first complete JSON object
   const jsonStr = extractFirstJson(response);
   if (!jsonStr) {
     debug('No JSON found in response: %s', response.slice(0, 500));
@@ -498,16 +594,33 @@ function parseVisionResponse(response: string): VisionThinkingResult {
     if (!parsed.thought || typeof parsed.thought !== 'string') {
       throw new Error('Missing or invalid thought field');
     }
-    if (!parsed.action || typeof parsed.action !== 'object') {
-      throw new Error('Missing or invalid action field');
+
+    // Accept either 'actions' (array) or 'action' (single)
+    let actions: VisionAction[];
+    if (parsed.actions) {
+      actions = Array.isArray(parsed.actions) ? parsed.actions : [parsed.actions];
+    } else if (parsed.action && typeof parsed.action === 'object') {
+      actions = [parsed.action];
+    } else {
+      throw new Error('Missing action or actions field');
     }
-    if (!parsed.action.type) {
-      throw new Error('Missing action type');
+
+    for (const action of actions) {
+      if (!action.type) {
+        throw new Error('Action missing type field');
+      }
     }
+
+    if (actions.length > MAX_BATCH_SIZE) {
+      debug('Vision batch size %d exceeds max %d, truncating', actions.length, MAX_BATCH_SIZE);
+      actions = actions.slice(0, MAX_BATCH_SIZE);
+    }
+
+    actions = truncateAfterDocumentRead(actions) as VisionAction[];
 
     return {
       thought: parsed.thought,
-      action: parsed.action,
+      actions,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
     };
   } catch (err) {
@@ -554,7 +667,7 @@ async function cleanupScreenshot(filepath: string): Promise<void> {
 /**
  * Invoke Claude CLI with vision (file-based)
  */
-async function invokeClaudeCLIWithVision(
+export async function invokeClaudeCLIWithVision(
   systemPrompt: string,
   userPrompt: string,
   screenshotPath: string,
@@ -584,7 +697,7 @@ async function invokeClaudeCLIWithVision(
 
     const proc = spawn(claudePath!, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, CLAUDECODE: undefined },
     });
 
     let stdout = '';
@@ -630,7 +743,7 @@ export async function getNextActionFromScreenshot(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null
-): Promise<VisionThinkingResult> {
+): Promise<VisionBatchThinkingResult> {
   const systemPrompt = buildVisionSystemPrompt(persona);
   const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback);
 
@@ -660,6 +773,8 @@ export function formatAction(action: Action): string {
       return `Typed "${action.text}" into element ${action.elementId}`;
     case 'scroll':
       return `Scrolled ${action.direction} ${action.amount}px`;
+    case 'drag':
+      return `Dragged element ${action.elementId} to element ${action.targetElementId}`;
     case 'hover':
       return `Hovered over element ${action.elementId}`;
     case 'wait':
@@ -690,6 +805,13 @@ export function formatVisionAction(action: VisionAction): string {
       return `[sight] Pressed ${action.key}`;
     case 'scroll':
       return `[sight] Scrolled ${action.direction} ${action.amount}px`;
+    case 'drag': {
+      if (action.sourceX !== undefined && action.targetX !== undefined) {
+        return `[sight] Dragged from (${action.sourceX},${action.sourceY}) to (${action.targetX},${action.targetY})`;
+      }
+      const targetRef = action.targetElementId !== undefined ? ` to element [${action.targetElementId}]` : '';
+      return `[sight] Dragged${elemRef}${targetRef}`;
+    }
     case 'hover':
       return `[sight] Hovered over${elemRef}`;
     case 'wait':
@@ -703,4 +825,46 @@ export function formatVisionAction(action: VisionAction): string {
     default:
       return `[sight] Unknown action: ${action.type}`;
   }
+}
+
+/**
+ * Normalize a single-action result to batch format (backward compatibility)
+ */
+export function normalizeToBatch(
+  result: ThinkingResult | BatchThinkingResult
+): BatchThinkingResult {
+  if ('action' in result && !('actions' in result)) {
+    return { thought: result.thought, actions: [(result as ThinkingResult).action], confidence: result.confidence };
+  }
+  return result as BatchThinkingResult;
+}
+
+/**
+ * Format batch execution results as feedback for the next LLM call
+ */
+export function formatBatchFeedback(
+  results: Array<{ actionDesc: string; success: boolean; error?: string }>,
+  bailReason?: string
+): string {
+  if (results.length === 0) {
+    return bailReason ? `BATCH SKIPPED: ${bailReason}` : 'No actions executed.';
+  }
+
+  if (results.length === 1) {
+    const r = results[0];
+    return r.success
+      ? `SUCCESS: "${r.actionDesc}" completed successfully.`
+      : `FAILED: "${r.actionDesc}" failed with error: ${r.error}. Try a different approach.`;
+  }
+
+  const lines = results.map((r, i) =>
+    r.success
+      ? `${i + 1}. SUCCESS: "${r.actionDesc}"`
+      : `${i + 1}. FAILED: "${r.actionDesc}" - ${r.error}`
+  );
+  const header = bailReason
+    ? `BATCH RESULT (${results.length} actions executed, bailed: ${bailReason}):`
+    : `BATCH RESULT (${results.length} actions completed):`;
+
+  return [header, ...lines].join('\n');
 }
