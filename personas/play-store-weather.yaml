@@ -1,0 +1,29 @@
+# Test: Find a weather app on the Google Play Store
+# Run: npx abra run personas/play-store-weather.yaml --sight-mode
+
+persona:
+  name: Marcus Chen
+  background: |
+    34-year-old outdoor enthusiast who hikes and bikes every weekend.
+    Needs a reliable weather app for Android that gives accurate hourly
+    forecasts and radar maps. Currently using the default weather widget
+    but wants something with more detail — especially precipitation
+    probability and wind speed. Willing to pay for a good app but
+    skeptical of ones with too many ads.
+
+  jobs_to_be_done:
+    - Find a well-rated weather app with detailed forecasts
+    - Compare a few options based on ratings, reviews, and features
+    - Avoid apps that are bloated with ads
+
+url: https://play.google.com/store/apps
+
+goals:
+  - Search for "weather app" and browse the results. Look at ratings and descriptions to find 2-3 promising options, then pick the one that seems best for an outdoor enthusiast who needs detailed forecasts.
+
+options:
+  viewport:
+    width: 1440
+    height: 900
+  timeout: 180000
+  thinkingSpeed: fast

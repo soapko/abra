@@ -164,6 +164,18 @@
   - Enables multi-step batches like: click Theme dropdown → click "Purple" by label
   - **Depends on:** Task 18 (Domain Knowledge), Task 17 (Batch Execution)
 
+## 016.core
+
+- [◒] **Task 22: Operational playbooks** -> [016.core.01-operational-playbooks.md](docs/tasks/016.core.01-operational-playbooks.md)
+  - Replace transition records with stored playbooks (named sequences of concrete operations)
+  - LLM outputs operation queues: selector + relative coordinates, executed mechanically
+  - Relative coordinate system: store positions as viewport ratios, recompute at replay time
+  - Playbook recording: successful sequences saved automatically for replay on return visits
+  - Selector-first targeting with coordinate fallback (no more label resolution)
+  - Remove knowledge assertions during execution (simplify bail-out to: error, URL change, timeout)
+  - **Replaces:** Task 18 (Domain Knowledge), Task 21 (Knowledge-driven Batching)
+  - **Depends on:** 013.core.01 (DOM Settle Detection), 011.features.01 (Batch Action Execution)
+
 ---
 
 ## Task Status Key

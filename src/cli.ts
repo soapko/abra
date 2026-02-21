@@ -78,8 +78,8 @@ program
   .option('--sight-mode', 'Use screenshots for decision-making instead of HTML analysis')
   .option('--observe', 'Enable observer agent for concurrent page documentation')
   .option('--goals <indices>', 'Run only specific goals (comma-separated, 1-indexed)')
-  .option('--no-learn', 'Disable domain knowledge recording and assertions')
-  .action(async (personaFile: string, options: { output: string; headless?: boolean; sightMode?: boolean; observe?: boolean; goals?: string; learn?: boolean }) => {
+  .option('--no-playbooks', 'Disable playbook recording and replay')
+  .action(async (personaFile: string, options: { output: string; headless?: boolean; sightMode?: boolean; observe?: boolean; goals?: string; playbooks?: boolean }) => {
     const spinner = createSpinner('Loading persona configuration...');
 
     try {
@@ -271,7 +271,7 @@ program
           headless: options.headless,
           sightMode: options.sightMode,
           observe: options.observe,
-          learn: options.learn,
+          playbooks: options.playbooks,
           onThought: (thought, goalIndex) => {
             const msg = `Goal ${goalIndex + 1}: ${thought.slice(0, 60)}...`;
             if (isTTY) {

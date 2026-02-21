@@ -123,15 +123,21 @@ window.__abraSpeechBubble = {
     const existing = document.querySelector('.abra-speech-bubble');
     if (existing) existing.remove();
 
-    // Always create a fresh bubble element
+    // Always create a fresh bubble element (using DOM API for Trusted Types CSP compatibility)
     this.element = document.createElement('div');
     this.element.className = 'abra-speech-bubble';
-    this.element.innerHTML = \`
-      <div class="persona-name">\${this.personaName} thinks...</div>
-      <div class="thought-text"></div>
-    \`;
+
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'persona-name';
+    nameDiv.textContent = this.personaName + ' thinks...';
+    this.element.appendChild(nameDiv);
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'thought-text';
+    this.element.appendChild(textDiv);
+
     document.body.appendChild(this.element);
-    this.textElement = this.element.querySelector('.thought-text');
+    this.textElement = textDiv;
   },
 
   _ensureAttached() {
@@ -184,11 +190,15 @@ window.__abraSpeechBubble = {
     this.typeInterval = setInterval(() => {
       if (charIndex < this.targetText.length) {
         this.currentText += this.targetText[charIndex];
-        this.textElement.innerHTML = this.currentText + '<span class="cursor-char"></span>';
+        this.textElement.textContent = '';
+        this.textElement.appendChild(document.createTextNode(this.currentText));
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor-char';
+        this.textElement.appendChild(cursor);
         charIndex++;
       } else {
         this.isTyping = false;
-        this.textElement.innerHTML = this.currentText;
+        this.textElement.textContent = this.currentText;
         clearInterval(this.typeInterval);
         this.typeInterval = null;
       }
@@ -224,7 +234,13 @@ window.__abraSpeechBubble = {
     }
     this.currentText = '';
     this.targetText = '';
-    this.textElement.innerHTML = '<span class="thinking-dots"><span></span><span></span><span></span></span>';
+    this.textElement.textContent = '';
+    const dots = document.createElement('span');
+    dots.className = 'thinking-dots';
+    dots.appendChild(document.createElement('span'));
+    dots.appendChild(document.createElement('span'));
+    dots.appendChild(document.createElement('span'));
+    this.textElement.appendChild(dots);
   },
 
   hide() {

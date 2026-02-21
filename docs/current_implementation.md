@@ -23,8 +23,7 @@ src/
     ├── action-executor.ts # Map LLM decisions to puppet commands
     ├── session.ts        # Main orchestrator loop
     ├── dom-settle.ts     # Adaptive DOM settle detection (MutationObserver)
-    ├── state-observer.ts # DOM state delta capture for learning
-    └── domain-knowledge.ts # Persistent domain knowledge store
+    └── playbook-store.ts # Persistent playbook storage and replay
 ```
 
 ## Key Components
@@ -53,9 +52,12 @@ src/
 - Auto-positions to stay on screen
 
 ### Session Orchestrator
-- Main loop: analyze → think → show bubble → execute batch → repeat
-- Batch execution: LLM can return multiple actions per cycle, executed in sequence
-- Bail-out checks between batch actions: failure, URL change, missing target, assertion mismatch
+- Main loop: analyze → think → show bubble → execute operation queue → repeat
+- Operation queue: LLM outputs concrete operations executed mechanically in sequence
+- Playbook references expanded inline at execution time
+- Bail-out checks between operations: failure, URL change, missing target
+- Operation recording: each successful action tracked for playbook creation
+- Post-session stitching: consecutive single-action iterations grouped into playbooks
 - Video recording per goal
 - Saves transcripts and session metadata
 - Handles timeouts and action limits
@@ -67,15 +69,19 @@ src/
 - Fast pages settle in ~20ms, framework re-renders in ~100-150ms, API loads in ~500ms-2s
 - Navigation-safe: try/catch around evaluate() handles page transitions
 
-### Domain Knowledge & Learned Assertions
-- Observes DOM state deltas after each action (focus, aria changes, visibility, URL)
-- Records transitions per domain in `~/.abra/domains/` as JSONL files
-- On repeat visits, asserts expected outcomes — bails to re-sensing on mismatch
-- Piecemeal learning: only updates the specific transition that changed
-- Cold start = current behavior; gets faster with each visit
-- Similarity matching: additive noise ignored, only missing expected changes trigger bail
-- `--no-learn` CLI flag disables knowledge recording and assertions
-- Append-only per-session log files prevent concurrent write conflicts
+### Operational Playbooks
+- Records successful operation sequences as named playbooks per domain
+- Storage: `~/.abra/domains/{domain}/playbooks.json` (JSON, not JSONL)
+- Relative coordinates: positions stored as viewport ratios, recomputed at replay time
+- Selector-first targeting with coordinate fallback when selectors break
+- Playbook recording: saves inline 2+ operation batches that complete without bail
+- Post-session stitching: groups consecutive single-action iterations into playbooks
+- LLM prompt injection: available playbooks shown as referenceable sequences
+- Playbook references: LLM can output `{"playbook": "name"}` to replay stored sequences
+- Rich bail feedback: includes playbook name, step number, and failure reason
+- Success/failure tracking per playbook for reliability assessment
+- `--no-playbooks` CLI flag disables playbook recording and replay
+- Replaces: domain knowledge (JSONL), state observer, label resolution
 
 ### Shadow DOM Click Support
 - `deepElementFromPoint(x, y)` pierces shadow DOM to find actual element
@@ -98,7 +104,7 @@ src/
 - `abra run <persona.yaml>` - Run simulation
   - `--sight-mode` - Use screenshots for decision-making
   - `--observe` - Enable observer agent for concurrent documentation
-  - `--no-learn` - Disable domain knowledge recording and assertions
+  - `--no-playbooks` - Disable playbook recording and replay
   - `--goals <indices>` - Run specific goals only
   - `--headless` - Run browser in headless mode
 - `abra validate <persona.yaml>` - Validate config

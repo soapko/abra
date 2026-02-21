@@ -31,8 +31,8 @@ export interface Action {
   elementId?: number;
   // Selector to use
   selector?: string;
-  // Label to match by visible text (for elements not yet visible — resolved at execution time)
-  label?: string;
+  // Playbook reference — name of a stored playbook to replay
+  playbook?: string;
   // Target element ID (for drag action)
   targetElementId?: number;
   // Target selector (for drag action)
@@ -54,6 +54,8 @@ export interface Action {
   duration?: number;
   // Reason for done/failed
   reason?: string;
+  // LLM-provided name for this sequence (for playbook recording)
+  sequenceName?: string;
   // Document action configuration
   document?: {
     operation: DocumentOperation;
@@ -76,6 +78,8 @@ export interface BatchThinkingResult {
   thought: string;
   actions: Action[];
   confidence: number;
+  /** Optional name for this sequence (used for playbook recording) */
+  sequenceName?: string;
 }
 
 /** Max actions per batch (defensive cap) */
@@ -102,11 +106,12 @@ You are browsing a website to achieve specific goals. For each step:
 Your response MUST be valid JSON with this exact structure:
 {
   "thought": "Your internal monologue as this persona (1-2 sentences, first person)",
+  "sequenceName": "optional short name for this action sequence (for future replay)",
   "actions": [
     {
       "type": "click|type|press|scroll|hover|drag|wait|done|failed",
       "elementId": <number if clicking/typing/hovering/dragging on an element>,
-      "label": "<visible text to match — for elements not yet visible>",
+      "playbook": "<name of a stored playbook to replay>",
       "selector": "<selector string if needed>",
       "targetElementId": <number of target element for drag>,
       "targetSelector": "<target selector for drag>",
@@ -121,38 +126,30 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING — CRITICAL FOR PERFORMANCE:
-You MUST return multiple actions whenever the next steps are predictable.
-Each sensing cycle (page analysis + LLM call) is expensive — 5-15 seconds.
-Batching saves enormous time. The system will automatically bail out if
-something unexpected happens, so err on the side of batching more.
+OPERATION QUEUE MODEL:
+You output a queue of operations. The system executes them mechanically in order.
+No LLM involvement between operations — just lightweight bail checks (action failed? URL changed?).
+If something unexpected happens, the system stops, takes a fresh screenshot, and re-prompts you.
+
+Queue as many operations as you can predict. Each re-prompt costs 5-15 seconds.
+Err on the side of queuing more — the system will bail safely if anything goes wrong.
 
 ALWAYS batch these patterns (2-5 actions):
 - Form filling: click field + type text + press Tab/Enter
 - Search: click search box + type query + press Enter
-- Dropdown: click dropdown + click the option you want (use "label" for the option)
-- Menu navigation: click menu item + click sub-item
-- Settings: click toggle/checkbox + click another toggle/checkbox
 - Multi-step UI: click button + fill field + click submit
 - Dismissing modals + next action: click dismiss + click target element
 
 Only use a SINGLE action when:
-- You genuinely don't know what will appear (first visit, no domain knowledge)
-- The action causes navigation to a new page (link click, form submit to new URL)
+- You genuinely don't know what will appear (first visit, no stored playbooks)
+- The action causes navigation to a new page
 
-LABEL-BASED TARGETING:
-When you know (from domain knowledge or experience) that an element WILL appear after
-a preceding action but isn't visible yet, use "label" instead of "elementId":
-  {"type": "click", "label": "Purple"}
-The system will wait for the element to appear and click it by matching visible text.
-Use this for dropdown options, menu items, and dialog buttons that appear after interaction.
-
-DOMAIN KNOWLEDGE:
-If a "DOMAIN KNOWLEDGE" section is present in the prompt, it contains observations from
-previous visits — but only what has been explored so far, not everything available on the page.
-Use it to plan multi-step batches when helpful, but feel free to explore beyond what's recorded.
-For example, if knowledge says clicking "Theme" reveals options including "Purple", you can batch:
-  [{"type": "click", "elementId": 33}, {"type": "click", "label": "Purple"}]
+STORED PLAYBOOKS:
+If a "STORED PLAYBOOKS" section lists playbooks in the prompt, you may reference them by exact name:
+{"playbook": "dismiss-get-started-modal"}
+You can mix playbook references with inline operations in the same batch.
+ONLY reference playbooks that are explicitly listed. NEVER invent playbook names.
+If no playbooks are listed, use inline actions only (click, type, press, scroll, etc.).
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -187,7 +184,7 @@ Rules:
 - Think as the persona would, using their perspective and priorities
 - Be specific about which element to interact with using elementId
 - Keep thoughts natural and conversational
-- ALWAYS batch multiple actions when you have domain knowledge or can see all needed elements`;
+- ALWAYS queue multiple operations when you can predict the next steps`;
 }
 
 /**
@@ -200,17 +197,16 @@ function buildUserPrompt(
   documentIndex?: string,
   lastReadContent?: string | null,
   lastActionFeedback?: string | null,
-  domainKnowledge?: string | null
+  playbookSummary?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
   ];
 
-  // Domain knowledge BEFORE page elements — so LLM reads it first and can plan ahead
-  if (domainKnowledge) {
+  // Playbook summary BEFORE page elements — so LLM reads it first and can plan ahead
+  if (playbookSummary) {
     parts.push('');
-    parts.push('DOMAIN KNOWLEDGE:');
-    parts.push(domainKnowledge);
+    parts.push(playbookSummary);
   }
 
   parts.push('');
@@ -385,10 +381,10 @@ function parseResponse(response: string): BatchThinkingResult {
       throw new Error('Missing action or actions field');
     }
 
-    // Validate each action has a type
+    // Validate each action has a type or playbook reference
     for (const action of actions) {
-      if (!action.type) {
-        throw new Error('Action missing type field');
+      if (!action.type && !action.playbook) {
+        throw new Error('Action missing both type and playbook fields');
       }
     }
 
@@ -405,6 +401,7 @@ function parseResponse(response: string): BatchThinkingResult {
       thought: parsed.thought,
       actions,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
+      sequenceName: typeof parsed.sequenceName === 'string' ? parsed.sequenceName : undefined,
     };
   } catch (err) {
     throw new Error(`Failed to parse LLM response: ${err}`);
@@ -423,10 +420,10 @@ export async function getNextAction(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null,
-  domainKnowledge?: string | null
+  playbookSummary?: string | null
 ): Promise<BatchThinkingResult> {
   const systemPrompt = buildSystemPrompt(persona);
-  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback, domainKnowledge);
+  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary);
 
   debug('Getting next action for goal:', goal);
   debug('Page has %d elements', pageState.elements.length);
@@ -457,11 +454,12 @@ IMPORTANT: Use the element numbers from the annotations to specify which element
 Your response MUST be valid JSON with this exact structure:
 {
   "thought": "Your internal monologue as this persona (1-2 sentences, first person)",
+  "sequenceName": "optional short name for this action sequence (for future replay)",
   "actions": [
     {
       "type": "click|type|press|scroll|hover|drag|wait|done|failed",
       "elementId": <the number from the red label, e.g. 5 for [5]>,
-      "label": "<visible text to match — for elements not yet visible>",
+      "playbook": "<name of a stored playbook to replay>",
       "x": <pixel x coordinate for coordinate fallback click>,
       "y": <pixel y coordinate for coordinate fallback click>,
       "targetElementId": <number of target element for drag>,
@@ -480,39 +478,30 @@ Your response MUST be valid JSON with this exact structure:
   "confidence": <0.0 to 1.0>
 }
 
-ACTION BATCHING — CRITICAL FOR PERFORMANCE:
-You MUST return multiple actions whenever the next steps are predictable.
-Each sensing cycle (screenshot + LLM call) is expensive — 5-15 seconds.
-Batching saves enormous time. The system will automatically bail out if
-something unexpected happens, so err on the side of batching more.
+OPERATION QUEUE MODEL:
+You output a queue of operations. The system executes them mechanically in order.
+No LLM involvement between operations — just lightweight bail checks (action failed? URL changed?).
+If something unexpected happens, the system stops, takes a fresh screenshot, and re-prompts you.
+
+Queue as many operations as you can predict. Each re-prompt costs 5-15 seconds.
+Err on the side of queuing more — the system will bail safely if anything goes wrong.
 
 ALWAYS batch these patterns (2-5 actions):
 - Form filling: click field + type text + press Tab/Enter
 - Search: click search box + type query + press Enter
-- Dropdown: click dropdown + click the option you want (use "label" for the option)
-- Menu navigation: click menu item + click sub-item
-- Settings: click toggle/checkbox + click another toggle/checkbox
 - Multi-step UI: click button + fill field + click submit
-- Theme customizer: click color category + click color swatch (use "label")
 - Dismissing modals + next action: click dismiss + click target element
 
 Only use a SINGLE action when:
-- You genuinely don't know what will appear (first visit, no domain knowledge)
-- The action causes navigation to a new page (link click, form submit to new URL)
+- You genuinely don't know what will appear (first visit, no stored playbooks)
+- The action causes navigation to a new page
 
-LABEL-BASED TARGETING:
-When you know (from domain knowledge or experience) that an element WILL appear after
-a preceding action but isn't visible yet, use "label" instead of "elementId":
-  {"type": "click", "label": "Purple"}
-The system will wait for the element to appear and click it by matching visible text.
-Use this for dropdown options, menu items, and dialog buttons that appear after interaction.
-
-DOMAIN KNOWLEDGE:
-If a "DOMAIN KNOWLEDGE" section is present in the prompt, it contains observations from
-previous visits — but only what has been explored so far, not everything available on the page.
-Use it to plan multi-step batches when helpful, but feel free to explore beyond what's recorded.
-For example, if knowledge says clicking "Theme" reveals options including "Purple", you can batch:
-  [{"type": "click", "elementId": 33}, {"type": "click", "label": "Purple"}]
+STORED PLAYBOOKS:
+If a "STORED PLAYBOOKS" section lists playbooks in the prompt, you may reference them by exact name:
+{"playbook": "dismiss-get-started-modal"}
+You can mix playbook references with inline operations in the same batch.
+ONLY reference playbooks that are explicitly listed. NEVER invent playbook names.
+If no playbooks are listed, use inline actions only (click, type, press, scroll, etc.).
 
 "done" and "failed" must ALWAYS be the LAST action in the array.
 
@@ -555,7 +544,7 @@ Rules:
 - Use "failed" if you cannot find a way to achieve the goal
 - Think as the persona would, using their perspective and priorities
 - For typing: first click the input field, then type in a separate action
-- ALWAYS batch multiple actions when you have domain knowledge or can see all needed elements`;
+- ALWAYS queue multiple operations when you can predict the next steps`;
 }
 
 /**
@@ -568,17 +557,16 @@ function buildVisionUserPrompt(
   documentIndex?: string,
   lastReadContent?: string | null,
   lastActionFeedback?: string | null,
-  domainKnowledge?: string | null
+  playbookSummary?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
   ];
 
-  // Domain knowledge BEFORE element legend — so LLM reads it first
-  if (domainKnowledge) {
+  // Playbook summary BEFORE element legend — so LLM reads it first
+  if (playbookSummary) {
     parts.push('');
-    parts.push('DOMAIN KNOWLEDGE:');
-    parts.push(domainKnowledge);
+    parts.push(playbookSummary);
   }
 
   parts.push('');
@@ -641,6 +629,7 @@ export interface VisionBatchThinkingResult {
   thought: string;
   actions: VisionAction[];
   confidence: number;
+  sequenceName?: string;
 }
 
 /**
@@ -695,8 +684,8 @@ function parseVisionResponse(response: string): VisionBatchThinkingResult {
     }
 
     for (const action of actions) {
-      if (!action.type) {
-        throw new Error('Action missing type field');
+      if (!action.type && !action.playbook) {
+        throw new Error('Action missing both type and playbook fields');
       }
     }
 
@@ -711,6 +700,7 @@ function parseVisionResponse(response: string): VisionBatchThinkingResult {
       thought: parsed.thought,
       actions,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
+      sequenceName: typeof parsed.sequenceName === 'string' ? parsed.sequenceName : undefined,
     };
   } catch (err) {
     debug('JSON parse error. Raw JSON: %s', jsonStr.slice(0, 500));
@@ -832,10 +822,10 @@ export async function getNextActionFromScreenshot(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null,
-  domainKnowledge?: string | null
+  playbookSummary?: string | null
 ): Promise<VisionBatchThinkingResult> {
   const systemPrompt = buildVisionSystemPrompt(persona);
-  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback, domainKnowledge);
+  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary);
 
   debug('Getting next action from screenshot for goal:', goal);
 
@@ -856,9 +846,10 @@ export async function getNextActionFromScreenshot(
  * Format an action for the action history
  */
 export function formatAction(action: Action): string {
+  if (action.playbook) return `Playbook: "${action.playbook}"`;
+
   switch (action.type) {
     case 'click':
-      if (action.label) return `Clicked by label "${action.label}"`;
       return `Clicked element ${action.elementId} (${action.selector})`;
     case 'type':
       return `Typed "${action.text}" into element ${action.elementId}`;
@@ -885,11 +876,12 @@ export function formatAction(action: Action): string {
  * Format a vision action for the action history
  */
 export function formatVisionAction(action: VisionAction): string {
+  if (action.playbook) return `[sight] Playbook: "${action.playbook}"`;
+
   const elemRef = action.elementId !== undefined ? ` element [${action.elementId}]` : '';
 
   switch (action.type) {
     case 'click':
-      if (action.label) return `[sight] Click by label "${action.label}"`;
       return `[sight] Clicked${elemRef}`;
     case 'type':
       return `[sight] Typed "${action.text}" into${elemRef}`;

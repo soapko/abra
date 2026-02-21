@@ -37,12 +37,13 @@ import { DocumentWriter } from './document-writer.js';
 import { PAGE_CONTENT_SCRIPT, type PageContent } from './page-content-extractor.js';
 import { getObserverAction, type ObserverResult } from './observer-llm.js';
 import { waitForDOMSettle } from './dom-settle.js';
-import { installObserver, collectObservation, teardownObserver } from './state-observer.js';
 import {
-  DomainKnowledgeStore,
-  assertDeltaMatch,
-  buildActionSignature,
-} from './domain-knowledge.js';
+  PlaybookStore,
+  toRelative,
+  toAbsolute,
+  type RecordedOperation,
+  type PlaybookOperation,
+} from './playbook-store.js';
 
 const debug = createDebug('abra:session');
 
@@ -71,8 +72,8 @@ export interface SessionOptions {
   headless?: boolean;
   sightMode?: boolean;
   observe?: boolean;
-  /** Enable domain knowledge learning and assertions. Default: true */
-  learn?: boolean;
+  /** Enable playbook recording and replay. Default: true */
+  playbooks?: boolean;
   onThought?: (thought: string, goalIndex: number) => void;
   onAction?: (action: string, goalIndex: number) => void;
   onObservation?: (observation: string, goalIndex: number) => void;
@@ -108,11 +109,41 @@ interface BatchExecutionResult {
   terminalAction?: Action;
   urlChanged: boolean;
   bailReason?: string;
+  /** Operations recorded during execution (for playbook creation) */
+  recordedOps: RecordedOperation[];
+}
+
+/**
+ * Get the current viewport dimensions from the browser.
+ */
+async function getViewport(browser: Browser): Promise<{ width: number; height: number }> {
+  try {
+    const dims = await browser.evaluate(
+      'JSON.stringify({ width: window.innerWidth, height: window.innerHeight })'
+    ) as string;
+    return JSON.parse(dims);
+  } catch {
+    return { width: 1440, height: 900 }; // fallback
+  }
+}
+
+/**
+ * Get current scroll position from the browser.
+ */
+async function getScroll(browser: Browser): Promise<{ x: number; y: number }> {
+  try {
+    const scroll = await browser.evaluate(
+      'JSON.stringify({ x: window.scrollX, y: window.scrollY })'
+    ) as string;
+    return JSON.parse(scroll);
+  } catch {
+    return { x: 0, y: 0 };
+  }
 }
 
 /**
  * Execute a batch of actions with bail-out checks between each.
- * Optionally observes state deltas and asserts against domain knowledge.
+ * Records each successful operation for playbook creation.
  * Returns results for all executed actions plus any terminal action.
  */
 async function executeBatch(
@@ -125,19 +156,15 @@ async function executeBatch(
     onAction: (desc: string) => void;
     onError: (desc: string, error: string) => void;
   },
-  knowledge?: {
-    store: DomainKnowledgeStore;
-    domain: string;
-    pagePath: string;
-  }
+  playbookStore?: PlaybookStore,
+  domain?: string
 ): Promise<BatchExecutionResult> {
   const batchT0 = Date.now();
   const results: BatchActionResult[] = [];
+  const recordedOps: RecordedOperation[] = [];
   let terminalAction: Action | undefined;
   let urlChanged = false;
   let bailReason: string | undefined;
-  // Mutable copy — may be refreshed during label resolution
-  let currentElements = elements;
 
   // Get initial URL for change detection
   let currentUrl: string;
@@ -148,6 +175,7 @@ async function executeBatch(
   }
 
   const formatFn = callbacks.sightMode ? formatVisionAction : formatAction;
+  const viewport = await getViewport(browser);
 
   for (let i = 0; i < actions.length; i++) {
     const action = actions[i];
@@ -158,59 +186,72 @@ async function executeBatch(
       break;
     }
 
-    // Label resolution: if action has label but no elementId/selector, find element by text
-    if (action.label && action.elementId === undefined && !action.selector) {
-      debug('Resolving label "%s" — re-scanning page', action.label);
+    // Playbook reference — expand into operations
+    if (action.playbook && playbookStore && domain) {
+      const expansion = playbookStore.expand(domain, action.playbook, viewport);
+      if (!expansion) {
+        // Hallucinated playbook name — skip this action and continue
+        debug('Playbook "%s" not found — skipping (LLM may have invented it)', action.playbook);
+        results.push({ actionDesc: `Playbook "${action.playbook}" (not found, skipped)`, success: false, error: 'playbook not found' });
+        continue;
+      }
 
-      // Wait for DOM to settle (the preceding action may have opened a dropdown)
-      await waitForDOMSettle(browser);
+      debug('Expanding playbook "%s" (%d operations)', action.playbook, expansion.operations.length);
 
-      try {
-        // Re-run page analyzer to get fresh elements
-        const freshState = await browser.evaluate(PAGE_ANALYZER_SCRIPT) as PageState;
-        const label = action.label.toLowerCase();
+      // Execute each playbook operation inline
+      for (let j = 0; j < expansion.operations.length; j++) {
+        const op = expansion.operations[j];
+        const opDesc = `[playbook "${action.playbook}" step ${j + 1}/${expansion.operations.length}] ${op.type} ${op.selector || ''}`;
+        callbacks.onAction(opDesc);
 
-        // Find element by: exact text match, then contains, then ariaLabel
-        const match =
-          freshState.elements.find(el => el.text.toLowerCase() === label) ||
-          freshState.elements.find(el => el.text.toLowerCase().includes(label)) ||
-          freshState.elements.find(el => el.ariaLabel?.toLowerCase() === label) ||
-          freshState.elements.find(el => el.ariaLabel?.toLowerCase().includes(label));
+        const opResult = await executePlaybookOperation(browser, op, viewport, documentWriter);
+        results.push({ actionDesc: opDesc, success: opResult.success, error: opResult.error });
 
-        if (match) {
-          debug('Label "%s" resolved to element [%d] (%s): %s', action.label, match.id, match.tag, match.selector);
-          action.elementId = match.id;
-          action.selector = match.selector;
-          // Update elements reference so downstream lookups work
-          currentElements = freshState.elements;
-        } else {
-          bailReason = `label not found: "${action.label}"`;
-          debug('Label resolution failed: no element matching "%s" (scanned %d elements)', action.label, freshState.elements.length);
+        if (!opResult.success) {
+          bailReason = `playbook "${action.playbook}" failed at step ${j + 1}: ${opResult.error}`;
+          callbacks.onError(opDesc, opResult.error!);
+          playbookStore.markFailure(expansion.playbook);
           break;
         }
-      } catch (err) {
-        bailReason = `label resolution error: ${err}`;
-        debug('Label resolution error: %s', err);
-        break;
+
+        // Auto-inject DOM settle between operations
+        if (j < expansion.operations.length - 1) {
+          await waitForDOMSettle(browser);
+
+          // Check URL change
+          try {
+            const newUrl = await browser.evaluate('window.location.href') as string;
+            if (newUrl !== currentUrl) {
+              urlChanged = true;
+              bailReason = `URL changed during playbook "${action.playbook}" at step ${j + 1}`;
+              break;
+            }
+          } catch {
+            urlChanged = true;
+            bailReason = `navigation during playbook "${action.playbook}"`;
+            break;
+          }
+        }
       }
+
+      if (bailReason) break;
+
+      // Playbook completed successfully
+      playbookStore.markSuccess(expansion.playbook);
+      continue;
     }
 
     const actionT0 = Date.now();
     const actionDesc = formatFn(action);
     callbacks.onAction(actionDesc);
 
-    // Find the target element for knowledge lookups and observer scoping
+    // Find the target element
     const targetElement = action.elementId !== undefined
-      ? currentElements.find(el => el.id === action.elementId)
+      ? elements.find(el => el.id === action.elementId)
       : null;
 
-    // Install state observer before action (if learning)
-    if (knowledge) {
-      await installObserver(browser, targetElement?.selector);
-    }
-
     // Execute the action
-    const execResult = await executeAction(browser, action, currentElements, documentWriter);
+    const execResult = await executeAction(browser, action, elements, documentWriter);
     debug('  Action %d/%d executed in %dms: %s', i + 1, actions.length, Date.now() - actionT0, actionDesc);
 
     results.push({
@@ -219,53 +260,36 @@ async function executeBatch(
       error: execResult.error,
     });
 
-    // Bail on failure — tear down observer without recording
+    // Bail on failure
     if (!execResult.success) {
-      if (knowledge) await teardownObserver(browser);
       callbacks.onError(actionDesc, execResult.error!);
       bailReason = `action failed: ${execResult.error}`;
       break;
     }
 
-    // Collect observation and assert/record (if learning)
-    if (knowledge) {
-      const actualDelta = await collectObservation(browser);
-      const actionSig = buildActionSignature(
-        action.type, targetElement ?? null, action.text, action.key
-      );
-      const existing = knowledge.store.findTransition(
-        knowledge.domain, knowledge.pagePath, actionSig
-      );
+    // Record the operation for playbook creation
+    const scroll = await getScroll(browser);
+    const recorded: RecordedOperation = {
+      type: action.type as RecordedOperation['type'],
+      selector: targetElement?.selector || action.selector,
+      text: action.text,
+      key: action.key,
+      direction: action.direction,
+      amount: action.amount,
+      duration: action.duration,
+      description: actionDesc,
+    };
 
-      if (existing) {
-        if (assertDeltaMatch(existing.expectedOutcome, actualDelta)) {
-          // Assertion passed — confirm
-          knowledge.store.confirmTransition(existing);
-          debug('Knowledge assertion passed for %s on %s', action.type, targetElement?.selector ?? 'unknown');
-        } else {
-          // Assertion failed — update knowledge and bail to re-sensing
-          if (actualDelta) {
-            knowledge.store.updateTransition(existing, actualDelta);
-          }
-          bailReason = 'knowledge assertion mismatch';
-          debug('Knowledge assertion FAILED for %s on %s — bailing to re-sense',
-            action.type, targetElement?.selector ?? 'unknown');
-          break;
-        }
-      } else if (actualDelta) {
-        // New transition — record it
-        knowledge.store.recordTransition({
-          domain: knowledge.domain,
-          pagePath: knowledge.pagePath,
-          action: actionSig,
-          expectedOutcome: actualDelta,
-          lastConfirmed: new Date().toISOString(),
-          confirmCount: 1,
-          failCount: 0,
-        });
-        debug('Recorded new transition for %s on %s', action.type, targetElement?.selector ?? 'unknown');
-      }
+    // Add relative position if we have bounds
+    if (targetElement?.bounds) {
+      const centerX = targetElement.bounds.x + targetElement.bounds.width / 2;
+      const centerY = targetElement.bounds.y + targetElement.bounds.height / 2;
+      recorded.position = toRelative(centerX, centerY, viewport, scroll);
+    } else if (action.sourceX !== undefined && action.sourceY !== undefined) {
+      recorded.position = toRelative(action.sourceX, action.sourceY, viewport, scroll);
     }
+
+    recordedOps.push(recorded);
 
     // If last action, skip inter-action checks
     if (i === actions.length - 1) break;
@@ -288,11 +312,11 @@ async function executeBatch(
       break;
     }
 
-    // Check next action's target element still exists (skip for label-based actions — they'll be resolved later)
+    // Check next action's target element still exists
     const nextAction = actions[i + 1];
-    if (nextAction && nextAction.type !== 'done' && nextAction.type !== 'failed' && !nextAction.label) {
+    if (nextAction && nextAction.type !== 'done' && nextAction.type !== 'failed' && !nextAction.playbook) {
       const nextElement = nextAction.elementId !== undefined
-        ? currentElements.find(el => el.id === nextAction.elementId)
+        ? elements.find(el => el.id === nextAction.elementId)
         : null;
       const nextSelector = nextElement?.selector || nextAction.selector;
 
@@ -326,7 +350,179 @@ async function executeBatch(
     terminalAction,
     urlChanged,
     bailReason,
+    recordedOps,
   };
+}
+
+/**
+ * Execute a single playbook operation.
+ * Uses selector-first targeting with coordinate fallback.
+ */
+async function executePlaybookOperation(
+  browser: Browser,
+  op: PlaybookOperation,
+  currentViewport: { width: number; height: number },
+  documentWriter: DocumentWriter
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    switch (op.type) {
+      case 'click': {
+        // Try selector first
+        if (op.selector) {
+          try {
+            await browser.click(op.selector);
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            debug('Playbook selector click failed: %s — trying coordinate fallback', msg.slice(0, 100));
+          }
+        }
+        // Coordinate fallback
+        if (op.position && browser.mouse) {
+          const abs = toAbsolute(op.position, currentViewport);
+          debug('Playbook coordinate click at (%d, %d)', abs.x, abs.y);
+          await browser.mouse.click(abs.x, abs.y);
+          return { success: true };
+        }
+        return { success: false, error: `No selector or coordinates for click` };
+      }
+
+      case 'type': {
+        if (!op.text) return { success: false, error: 'No text for type operation' };
+
+        // Check if target already has focus (from prior click in sequence)
+        let needsClick = true;
+        if (op.selector) {
+          const escapedSel = JSON.stringify(op.selector);
+          needsClick = !(await browser.evaluate(`
+            (function() {
+              var target = document.querySelector(${escapedSel});
+              if (!target) return false;
+              var active = document.activeElement;
+              if (!active) return false;
+              return active === target || target.contains(active) ||
+                (target.shadowRoot && target.shadowRoot.contains(active));
+            })()
+          `) as boolean);
+        }
+
+        if (needsClick && op.selector) {
+          try {
+            await browser.click(op.selector);
+          } catch {
+            // Click failed — try coordinate fallback
+            if (op.position && browser.mouse) {
+              const abs = toAbsolute(op.position, currentViewport);
+              await browser.mouse.click(abs.x, abs.y);
+            }
+          }
+          await browser.wait(100);
+        }
+
+        // Type using multi-strategy simulation (same as action-executor)
+        const escapedText = JSON.stringify(op.text);
+        await browser.evaluate(`
+          (function() {
+            var text = ${escapedText};
+            var el = document.activeElement;
+            if (el && el.shadowRoot) {
+              var inner = el.shadowRoot.querySelector('input, textarea, [contenteditable]');
+              if (inner) { inner.focus(); el = inner; }
+            }
+            if (!el) return;
+
+            // Clear existing value first
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            } else if (el.isContentEditable) {
+              el.textContent = '';
+            }
+
+            // Strategy 1: execCommand('insertText')
+            try {
+              var ok = document.execCommand('insertText', false, text);
+              if (ok) {
+                var currentVal = el.value !== undefined ? el.value : el.textContent;
+                if (currentVal && currentVal.indexOf(text) !== -1) return;
+              }
+            } catch(e) {}
+
+            // Strategy 2: Per-character InputEvent
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              el.value = '';
+              for (var i = 0; i < text.length; i++) {
+                var ch = text[i];
+                el.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true }));
+                el.dispatchEvent(new InputEvent('beforeinput', { data: ch, inputType: 'insertText', bubbles: true, cancelable: true }));
+                el.value += ch;
+                el.dispatchEvent(new InputEvent('input', { data: ch, inputType: 'insertText', bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true }));
+              }
+              if (el.value === text) return;
+            }
+
+            // Strategy 3: Native setter + synthetic events (React, Angular)
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              var nativeSetter = Object.getOwnPropertyDescriptor(
+                el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
+                'value'
+              );
+              if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(el, text);
+              } else {
+                el.value = text;
+              }
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (el.isContentEditable) {
+              el.textContent = text;
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+            }
+          })()
+        `);
+        return { success: true };
+      }
+
+      case 'press': {
+        const key = op.key || 'Enter';
+        if (browser.press) {
+          await browser.press(key);
+        } else {
+          await browser.evaluate(`
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: '${key}', bubbles: true }));
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', { key: '${key}', bubbles: true }));
+          `);
+        }
+        return { success: true };
+      }
+
+      case 'scroll': {
+        const direction = op.direction || 'down';
+        const amount = op.amount || 300;
+        await browser.scroll(direction, amount);
+        return { success: true };
+      }
+
+      case 'hover': {
+        if (op.selector) {
+          await browser.hover(op.selector);
+          return { success: true };
+        }
+        return { success: false, error: 'No selector for hover operation' };
+      }
+
+      case 'wait': {
+        await browser.wait(op.duration || 300);
+        return { success: true };
+      }
+
+      default:
+        return { success: false, error: `Unknown operation type: ${op.type}` };
+    }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /**
@@ -339,7 +535,7 @@ async function runGoal(
   goalIndex: number,
   options: SessionOptions,
   documentWriter: DocumentWriter,
-  knowledgeStore?: DomainKnowledgeStore
+  playbookStore?: PlaybookStore
 ): Promise<GoalResult> {
   const startTime = Date.now();
   const actionHistory: string[] = [];
@@ -349,8 +545,11 @@ async function runGoal(
   const thinkingDelay = getThinkingDelay(persona.options.thinkingSpeed);
   const sightMode = options.sightMode ?? false;
 
-  // Extract domain for knowledge lookups
+  // Extract domain for playbook lookups
   const domain = new URL(persona.url).hostname;
+
+  // Track all operations for post-session playbook stitching
+  const sessionActionLog: RecordedOperation[] = [];
 
   // Generate unique session IDs for LLM conversations
   // Navigator and Observer each get their own session for independent conversational memory
@@ -419,12 +618,12 @@ async function runGoal(
       const docIndex = documentWriter.formatIndexForLLM();
       const lastReadContent = documentWriter.getLastReadContent();
 
-      // Get domain knowledge summary for prompt injection
-      const knowledgeSummary = knowledgeStore
-        ? knowledgeStore.getKnowledgeSummary(domain) || null
+      // Get playbook summary for prompt injection
+      const playbookSummary = playbookStore
+        ? playbookStore.getSummary(domain) || null
         : null;
-      if (knowledgeSummary) {
-        debug('Injecting domain knowledge (%d chars) into prompt', knowledgeSummary.length);
+      if (playbookSummary) {
+        debug('Injecting playbook summary (%d chars) into prompt', playbookSummary.length);
       }
 
       let navigatorPromise: Promise<BatchThinkingResult | VisionBatchThinkingResult>;
@@ -446,10 +645,10 @@ async function runGoal(
         // Generate element legend for the prompt
         const elementLegend = formatElementLegend(pageState.elements);
 
-        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
       } else {
         // STANDARD MODE: Use HTML analysis for decision-making
-        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
       }
 
       // Build the observer LLM call (if enabled and page content was extracted)
@@ -485,9 +684,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
           }
         }
 
@@ -510,9 +709,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, knowledgeSummary);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
           }
         }
       }
@@ -631,18 +830,6 @@ async function runGoal(
       const typingDuration = thought.length * 30;
       await browser.wait(typingDuration);
 
-      // Build knowledge context for this iteration
-      let knowledgeContext: { store: DomainKnowledgeStore; domain: string; pagePath: string } | undefined;
-      if (knowledgeStore) {
-        let pagePath: string;
-        try {
-          pagePath = new URL(await browser.evaluate('window.location.href') as string).pathname;
-        } catch {
-          pagePath = '/';
-        }
-        knowledgeContext = { store: knowledgeStore, domain, pagePath };
-      }
-
       // Execute batch with bail-out checks
       const batchResult = await executeBatch(
         browser,
@@ -662,8 +849,29 @@ async function runGoal(
             transcript.push(`[${new Date().toISOString()}] Error: ${error}`);
           },
         },
-        knowledgeContext
+        playbookStore,
+        domain
       );
+
+      // Accumulate recorded operations for post-session stitching
+      sessionActionLog.push(...batchResult.recordedOps);
+
+      // If batch completed fully with 2+ inline operations, save as a playbook
+      if (playbookStore && !batchResult.bailReason && batchResult.recordedOps.length >= 2) {
+        let pagePath: string;
+        try {
+          pagePath = new URL(await browser.evaluate('window.location.href') as string).pathname;
+        } catch {
+          pagePath = '/';
+        }
+
+        const seqName = (navigatorResult as BatchThinkingResult).sequenceName
+          || playbookStore.autoName(batchResult.recordedOps);
+
+        const viewport = await getViewport(browser);
+        playbookStore.record(domain, pagePath, seqName, batchResult.recordedOps, viewport);
+        debug('Saved new playbook "%s" (%d ops)', seqName, batchResult.recordedOps.length);
+      }
 
       actionCount += batchResult.completedCount;
 
@@ -718,6 +926,21 @@ async function runGoal(
       transcript,
     };
   } finally {
+    // Post-session playbook stitching: create playbooks from single-action iterations
+    if (playbookStore && sessionActionLog.length >= 2) {
+      let pagePath: string;
+      try {
+        pagePath = new URL(await browser.evaluate('window.location.href') as string).pathname;
+      } catch {
+        pagePath = '/';
+      }
+      const viewport = await getViewport(browser);
+      const stitched = playbookStore.stitchFromLog(domain, pagePath, sessionActionLog, viewport);
+      if (stitched.length > 0) {
+        debug('Post-session stitching created %d playbooks from %d operations', stitched.length, sessionActionLog.length);
+      }
+    }
+
     // Cleanup speech bubble (may fail if page navigated)
     try {
       await browser.evaluate(getDestroyScript());
@@ -749,14 +972,14 @@ export async function runSession(
   const documentWriter = new DocumentWriter(sessionDir);
   await documentWriter.initialize();
 
-  // Initialize domain knowledge store (unless --no-learn)
-  const learn = options.learn !== false;
-  let knowledgeStore: DomainKnowledgeStore | undefined;
-  if (learn) {
+  // Initialize playbook store (unless --no-playbooks)
+  const playbooksEnabled = options.playbooks !== false;
+  let playbookStore: PlaybookStore | undefined;
+  if (playbooksEnabled) {
     const domain = new URL(persona.url).hostname;
-    knowledgeStore = new DomainKnowledgeStore(undefined, sessionId);
-    await knowledgeStore.load(domain);
-    debug('Domain knowledge loaded for %s (learning enabled)', domain);
+    playbookStore = new PlaybookStore();
+    await playbookStore.load(domain);
+    debug('Playbooks loaded for %s (%d stored)', domain, playbookStore.getPlaybooks(domain).length);
   }
 
   const startedAt = new Date().toISOString();
@@ -792,15 +1015,16 @@ export async function runSession(
         i,
         options,
         documentWriter,
-        knowledgeStore
+        playbookStore
       );
 
-      // Save domain knowledge after each goal
-      if (knowledgeStore) {
+      // Save playbooks after each goal
+      if (playbookStore) {
         try {
-          await knowledgeStore.saveAll();
+          const domain = new URL(persona.url).hostname;
+          await playbookStore.save(domain);
         } catch (err) {
-          debug('Failed to save domain knowledge: %s', err);
+          debug('Failed to save playbooks: %s', err);
         }
       }
 

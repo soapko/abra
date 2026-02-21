@@ -84,23 +84,16 @@ export {
   type DOMSettleOptions,
 } from './lib/dom-settle.js';
 
-// State observation
+// Playbook store
 export {
-  installObserver,
-  collectObservation,
-  teardownObserver,
-  type ElementSignature,
-  type StateDelta,
-} from './lib/state-observer.js';
-
-// Domain knowledge
-export {
-  DomainKnowledgeStore,
-  assertDeltaMatch,
-  buildActionSignature,
-  type ActionSignature,
-  type TransitionRecord,
-} from './lib/domain-knowledge.js';
+  PlaybookStore,
+  toRelative,
+  toAbsolute,
+  type RelativePosition,
+  type PlaybookOperation,
+  type Playbook,
+  type RecordedOperation,
+} from './lib/playbook-store.js';
 
 // Session orchestration
 export {

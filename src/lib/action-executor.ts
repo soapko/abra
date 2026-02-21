@@ -204,51 +204,118 @@ export async function executeAction(
           : null;
 
         const selector = element?.selector || action.selector;
-        if (!selector) {
-          throw new Error('No selector for type action');
-        }
         if (!action.text) {
           throw new Error('No text for type action');
         }
 
-        debug('Typing "%s" into:', action.text, selector);
+        // If we have a selector, check focus and click if needed
+        if (selector) {
+          debug('Typing "%s" into: %s', action.text, selector);
 
-        // Check if this is a shadow DOM element (selector contains >>> or __SHADOW_DOM__)
-        const isShadowElement = selector.includes('>>>') || selector.includes('__SHADOW_DOM__');
-
-        if (isShadowElement && element?.bounds && browser.mouse) {
-          // For shadow DOM: click at coordinates, then type via keyboard events
-          const center = getElementCenter(element);
-          debug('Shadow DOM element - clicking at (%d, %d) then typing via keyboard', center.x, center.y);
-          await browser.mouse.click(center.x, center.y);
-          await browser.wait(100); // Small delay for focus
-
-          // Type using keyboard events - escape the text for JavaScript
-          const escapedText = JSON.stringify(action.text);
-          await browser.evaluate(`
+          // Check if target element already has focus (e.g. from a prior click action in batch)
+          const escapedSelector = JSON.stringify(selector);
+          const alreadyFocused = await browser.evaluate(`
             (function() {
-              const text = ${escapedText};
-              const el = document.activeElement;
-              if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
-                // Clear existing value
-                if (el.value !== undefined) el.value = '';
-                // Set new value
-                if (el.value !== undefined) {
-                  el.value = text;
-                  el.dispatchEvent(new Event('input', { bubbles: true }));
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                } else {
-                  el.textContent = text;
-                  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
-                }
-              }
+              var target = document.querySelector(${escapedSelector});
+              if (!target) return false;
+              var active = document.activeElement;
+              if (!active) return false;
+              if (active === target) return true;
+              if (target.contains(active)) return true;
+              if (target.shadowRoot && target.shadowRoot.contains(active)) return true;
+              return false;
             })()
-          `);
+          `) as boolean;
+
+          if (!alreadyFocused) {
+            debug('Element not focused, clicking to focus');
+            const isShadowElement = selector.includes('>>>') || selector.includes('__SHADOW_DOM__');
+            if (isShadowElement && element?.bounds && browser.mouse) {
+              const center = getElementCenter(element);
+              debug('Shadow DOM element - clicking at (%d, %d)', center.x, center.y);
+              await browser.mouse.click(center.x, center.y);
+            } else {
+              await tryClickWithFallback(browser, selector, element);
+            }
+            await browser.wait(100);
+          } else {
+            debug('Element already focused, skipping click');
+          }
         } else {
-          // Regular element: focus first with fallback, then type
-          await tryClickWithFallback(browser, selector, element);
-          await browser.type(selector, action.text);
+          // No selector — type into whatever currently has focus
+          debug('Typing "%s" into currently focused element (no selector)', action.text);
         }
+
+        // Type into the focused element using multi-strategy simulation
+        // Strategy 1: execCommand('insertText') — triggers all framework observers
+        // Strategy 2: Per-character InputEvent — works with modern event listeners
+        // Strategy 3: Native setter + synthetic events — fallback for React inputs
+        const escapedText = JSON.stringify(action.text);
+        await browser.evaluate(`
+          (function() {
+            var text = ${escapedText};
+            var el = document.activeElement;
+            // If active element is a shadow host, try to find the input inside
+            if (el && el.shadowRoot) {
+              var inner = el.shadowRoot.querySelector('input, textarea, [contenteditable]');
+              if (inner) { inner.focus(); el = inner; }
+            }
+            if (!el) return;
+
+            // Clear existing value first
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            } else if (el.isContentEditable) {
+              el.textContent = '';
+            }
+
+            // Strategy 1: execCommand('insertText') — most reliable across frameworks
+            // Triggers beforeinput, input, and all MutationObserver callbacks
+            try {
+              var ok = document.execCommand('insertText', false, text);
+              if (ok) {
+                // Verify the text was actually inserted
+                var currentVal = el.value !== undefined ? el.value : el.textContent;
+                if (currentVal && currentVal.indexOf(text) !== -1) return;
+              }
+            } catch(e) {}
+
+            // Strategy 2: Per-character InputEvent with insertText type
+            // Works with search inputs that listen for keyboard-like events
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              el.value = '';
+              for (var i = 0; i < text.length; i++) {
+                var ch = text[i];
+                el.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true }));
+                el.dispatchEvent(new InputEvent('beforeinput', { data: ch, inputType: 'insertText', bubbles: true, cancelable: true }));
+                el.value += ch;
+                el.dispatchEvent(new InputEvent('input', { data: ch, inputType: 'insertText', bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true }));
+              }
+              // Verify insertion worked
+              if (el.value === text) return;
+            }
+
+            // Strategy 3: Native setter + synthetic events (React, Angular)
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+              var nativeSetter = Object.getOwnPropertyDescriptor(
+                el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
+                'value'
+              );
+              if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(el, text);
+              } else {
+                el.value = text;
+              }
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (el.isContentEditable) {
+              el.textContent = text;
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+            }
+          })()
+        `);
         break;
       }
 

@@ -1,0 +1,31 @@
+# Test: Find a fun two-player board game app on the Google Play Store
+# Run: npx abra run personas/play-store-board-games.yaml --sight-mode
+
+persona:
+  name: Priya Sharma
+  background: |
+    28-year-old who recently moved in with her partner. They enjoy
+    cozy evenings playing board games together but want something
+    they can also play on their phones when traveling or waiting
+    in line. Looking for a digital board game that's genuinely fun
+    with two players — not just a solo game with multiplayer tacked
+    on. Loves strategy games like Catan and Ticket to Ride but open
+    to simpler options too. Prefers polished UI and smooth animations
+    over clunky ports.
+
+  jobs_to_be_done:
+    - Find a board game app that's actually fun with exactly two players
+    - Check if it supports local or pass-and-play multiplayer
+    - Avoid pay-to-win mechanics and excessive in-app purchases
+
+url: https://play.google.com/store/apps
+
+goals:
+  - Search for "two player board game" and browse the results. Compare ratings, reviews, and descriptions to find a board game app that works well for two players. Look for ones with good multiplayer support and polished design.
+
+options:
+  viewport:
+    width: 1440
+    height: 900
+  timeout: 180000
+  thinkingSpeed: fast
