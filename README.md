@@ -65,6 +65,64 @@ node dist/cli.js run personas/first-time-buyer.yaml
 
 3. Watch the output videos in `./sessions/`
 
+## Authenticated Sessions
+
+Many sites require login (OAuth, email/password, etc.). Abra supports this by saving and restoring browser auth state.
+
+### 1. Capture auth state
+
+```bash
+# Opens a browser — log in manually, then press ENTER in the terminal
+abra auth google
+
+# Optionally navigate to a specific URL first
+abra auth claude --url https://claude.ai
+```
+
+Auth state is saved to `~/.abra/auth/<name>.json`. This file contains cookies and localStorage — enough to restore a logged-in session.
+
+### 2. Use it in a persona
+
+Add an `auth` field to your persona YAML:
+
+```yaml
+persona:
+  name: Shane
+  background: BDR at a SaaS company
+  jobs_to_be_done:
+    - Review shared documents and dashboards
+
+url: https://app.example.com/dashboard
+
+auth:
+  storageState: google        # loads ~/.abra/auth/google.json
+
+goals:
+  - Navigate to the reports page and export the weekly summary
+```
+
+You can also use an absolute path:
+
+```yaml
+auth:
+  storageState: /path/to/auth-state.json
+```
+
+Or connect to an already-running Chrome instance via CDP:
+
+```yaml
+auth:
+  cdpUrl: http://localhost:9222
+```
+
+### 3. Refreshing expired auth
+
+Auth tokens expire. Abra warns if your auth state file is older than 24 hours. To refresh, just run the capture command again:
+
+```bash
+abra auth google
+```
+
 ## CLI Commands
 
 ```bash
@@ -88,6 +146,10 @@ node dist/cli.js validate personas/buyer.yaml
 
 # List recent sessions
 node dist/cli.js sessions
+
+# Capture auth state for authenticated testing
+node dist/cli.js auth <name>
+node dist/cli.js auth <name> --url https://example.com
 ```
 
 ## Persona Configuration
@@ -105,6 +167,10 @@ url: string              # Starting URL for the session
 goals:                   # Specific tasks to attempt (one video per goal)
   - string
   - string
+
+auth:                    # Optional — for authenticated sessions
+  storageState: string   # Name (e.g. "google") or path to storageState JSON
+  cdpUrl: string         # Or connect to existing Chrome via CDP
 
 options:                 # Optional settings
   viewport:              # Browser viewport size
