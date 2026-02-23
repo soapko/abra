@@ -12,10 +12,54 @@ import { fileURLToPath } from 'url';
 import { readdir, stat, readFile } from 'fs/promises';
 import { loadPersona, validatePersona } from './lib/persona.js';
 import { runSession } from './lib/session.js';
+import { resolveAuth } from './lib/auth.js';
+import { runAuthCapture } from './commands/auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const isTTY = !!(process.stderr.isTTY);
+
+/**
+ * Wrap a raw Playwright Page to match the Browser interface expected by session.ts.
+ * Used for storageState and CDP auth modes where puppet's fluent API isn't available.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapPlaywrightPage(page: any) {
+  return {
+    click: (selector: string) => page.click(selector),
+    type: (selector: string, text: string) => page.fill(selector, text),
+    hover: (selector: string) => page.hover(selector),
+    drag: async (source: string, target: string) => {
+      await page.dragAndDrop(source, target);
+    },
+    dragCoordinates: async (sourceX: number, sourceY: number, targetX: number, targetY: number) => {
+      await page.mouse.move(sourceX, sourceY);
+      await page.mouse.down();
+      await page.mouse.move(targetX, targetY);
+      await page.mouse.up();
+    },
+    scroll: async (direction: 'up' | 'down', amount?: number) => {
+      const delta = (amount || 300) * (direction === 'up' ? -1 : 1);
+      await page.mouse.wheel(0, delta);
+    },
+    wait: (ms: number) => page.waitForTimeout(ms),
+    waitForLoaded: async (timeout?: number) => {
+      try {
+        await page.waitForLoadState('networkidle', { timeout: timeout || 5000 });
+      } catch { /* timeout is ok */ }
+    },
+    evaluate: (script: string) => page.evaluate(script),
+    screenshot: async () => await page.screenshot({ type: 'png' }),
+    press: async (key: string) => {
+      await page.keyboard.press(key);
+    },
+    mouse: {
+      click: async (x: number, y: number) => {
+        await page.mouse.click(x, y);
+      },
+    },
+  };
+}
 
 /**
  * Create a spinner that falls back to plain console.log in non-TTY environments.
@@ -113,6 +157,19 @@ program
         process.exit(1);
       }
 
+      // Resolve auth configuration
+      const authResult = persona.auth ? await resolveAuth(persona.auth) : null;
+      if (authResult) {
+        for (const warning of authResult.warnings) {
+          console.log(chalk.yellow(`⚠ ${warning}`));
+        }
+        if (authResult.mode === 'storageState') {
+          console.log(chalk.cyan(`Auth: loading storageState from ${authResult.filePath}`));
+        } else if (authResult.mode === 'cdp') {
+          console.log(chalk.cyan(`Auth: connecting via CDP to ${authResult.cdpUrl}`));
+        }
+      }
+
       // Log sight mode if enabled
       if (options.sightMode) {
         console.log(chalk.cyan('Sight mode enabled - using screenshots for decision-making'));
@@ -128,6 +185,65 @@ program
 
       const result = await runSession(
         async (browserOptions) => {
+          // --- CDP mode: connect to existing Chrome instance ---
+          if (authResult?.mode === 'cdp') {
+            const { chromium } = await import('playwright');
+            const cdpBrowser = await chromium.connectOverCDP(authResult.cdpUrl);
+            const contexts = cdpBrowser.contexts();
+            const context = contexts[0] || await cdpBrowser.newContext();
+            const pages = context.pages();
+            const page = pages[0] || await context.newPage();
+
+            return {
+              browser: wrapPlaywrightPage(page),
+              goto: (url: string) => page.goto(url).then(() => {}),
+              close: () => cdpBrowser.close(),
+              getVideoPath: () => Promise.resolve(null),
+            };
+          }
+
+          // --- storageState mode: use puppet's launchBrowser + manual context ---
+          if (authResult?.mode === 'storageState') {
+            const rawBrowser = await puppetModule.launchBrowser({
+              headless: browserOptions.headless,
+            });
+            const contextOptions: Record<string, unknown> = {
+              storageState: authResult.filePath,
+              viewport: { width: 1440, height: 900 },
+              userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              locale: 'en-US',
+              colorScheme: 'light',
+            };
+            if (browserOptions.video) {
+              contextOptions.recordVideo = {
+                dir: browserOptions.video.dir,
+                size: { width: 1440, height: 900 },
+              };
+            }
+            const context = await rawBrowser.newContext(contextOptions);
+            const page = await context.newPage();
+
+            return {
+              browser: wrapPlaywrightPage(page),
+              goto: (url: string) => page.goto(url).then(() => {}),
+              close: async () => {
+                await context.close();
+                await rawBrowser.close();
+              },
+              getVideoPath: async () => {
+                try {
+                  const video = page.video();
+                  if (video) {
+                    const path = await video.path();
+                    return { path };
+                  }
+                } catch { /* no video */ }
+                return null;
+              },
+            };
+          }
+
+          // --- Default mode: use puppet's fluent API ---
           const browser = await puppetModule.puppet({
             headless: browserOptions.headless,
             video: browserOptions.video,
@@ -429,6 +545,22 @@ program
       }
     } catch (err) {
       spinnerFail(spinner, 'Error');
+      console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+      process.exit(1);
+    }
+  });
+
+/**
+ * Auth command - capture browser auth state for authenticated testing
+ */
+program
+  .command('auth <name>')
+  .description('Capture browser auth state (opens browser for manual login)')
+  .option('-u, --url <url>', 'URL to navigate to before login')
+  .action(async (name: string, options: { url?: string }) => {
+    try {
+      await runAuthCapture(name, options);
+    } catch (err) {
       console.error(chalk.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }

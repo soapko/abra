@@ -15,7 +15,17 @@ export {
   type PersonaDetails,
   type Options,
   type Viewport,
+  type AuthConfig,
 } from './lib/persona.js';
+
+// Auth utilities
+export {
+  resolveAuth,
+  resolveStorageStatePath,
+  validateStorageState,
+  ensureAuthDir,
+  AUTH_DIR,
+} from './lib/auth.js';
 
 // Page analysis
 export {

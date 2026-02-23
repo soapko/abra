@@ -13,10 +13,13 @@ Abra is an automated user-testing platform that simulates personas interacting w
 
 ```
 src/
-├── cli.ts                # CLI entry point (run, validate, sessions commands)
+├── cli.ts                # CLI entry point (run, validate, sessions, auth commands)
 ├── index.ts              # Public API exports
+├── commands/
+│   └── auth.ts           # Auth capture command (abra auth <name>)
 └── lib/
     ├── persona.ts        # Persona config schema and loader (zod validation)
+    ├── auth.ts           # Auth utilities (path resolution, validation, storageState)
     ├── page-analyzer.ts  # Extract interactive elements from pages
     ├── llm.ts            # Claude CLI integration for persona thinking
     ├── speech-bubble.ts  # Inject speech bubble overlay into pages
@@ -32,6 +35,7 @@ src/
 - YAML-based configuration with zod validation
 - Defines: persona background, jobs-to-be-done, goals, URL
 - Options: viewport size, timeout, thinking speed
+- Optional `auth` field for authenticated sessions (storageState or CDP)
 
 ### Page Analyzer
 - Extracts all interactive elements (buttons, links, inputs, etc.)
@@ -99,6 +103,16 @@ src/
 - Size limit: 100KB per document
 - Filename sanitization prevents path traversal
 
+### Browser Auth State
+- `abra auth <name>` captures auth state by opening a browser for manual login
+- Saves Playwright storageState (cookies + localStorage) to `~/.abra/auth/<name>.json`
+- Persona YAML `auth.storageState` loads saved state before navigating (supports names or paths)
+- Persona YAML `auth.cdpUrl` connects to an existing Chrome instance via CDP
+- storageState mode: uses Playwright's `browser.newContext({ storageState })` via puppet's `launchBrowser()`
+- CDP mode: uses Playwright's `chromium.connectOverCDP()` directly
+- Warns if auth state file is older than 24 hours
+- Clear error messages when auth file is missing
+
 ## CLI Commands
 
 - `abra run <persona.yaml>` - Run simulation
@@ -109,6 +123,8 @@ src/
   - `--headless` - Run browser in headless mode
 - `abra validate <persona.yaml>` - Validate config
 - `abra sessions` - List past sessions
+- `abra auth <name>` - Capture browser auth state for authenticated testing
+  - `-u, --url <url>` - Navigate to a specific URL before login
 
 ## Dependencies
 

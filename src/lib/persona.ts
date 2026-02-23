@@ -15,6 +15,12 @@ const OptionsSchema = z.object({
   thinkingSpeed: z.enum(['slow', 'normal', 'fast']).default('fast'),
 }).default({});
 
+// Auth configuration schema
+const AuthSchema = z.object({
+  storageState: z.string().optional(),
+  cdpUrl: z.string().optional(),
+}).optional();
+
 // Main persona schema
 const PersonaDetailsSchema = z.object({
   name: z.string().min(1),
@@ -28,11 +34,13 @@ export const PersonaConfigSchema = z.object({
   url: z.string().url(),
   goals: z.array(z.string()).min(1),
   options: OptionsSchema,
+  auth: AuthSchema,
 });
 
 // Type exports
 export type Viewport = z.infer<typeof ViewportSchema>;
 export type Options = z.infer<typeof OptionsSchema>;
+export type AuthConfig = z.infer<typeof AuthSchema>;
 export type PersonaDetails = z.infer<typeof PersonaDetailsSchema>;
 export type PersonaConfig = z.infer<typeof PersonaConfigSchema>;
 
