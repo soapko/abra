@@ -24,8 +24,10 @@ import {
   getAnnotationScript,
   getRemoveAnnotationScript,
   formatElementLegend,
+  formatFocusedElementLegend,
+  isElementInRegion,
 } from './screenshot-annotator.js';
-import { executeAction, getElementCenter, getHumanDelay, type Browser } from './action-executor.js';
+import { executeAction, getElementCenter, getHumanDelay, type Browser, type TabInfo, type ScreenshotOptions } from './action-executor.js';
 import {
   getInitScript,
   getShowScript,
@@ -97,6 +99,81 @@ function slugify(text: string): string {
     .slice(0, 50);
 }
 
+interface ClipRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Minimum number of new elements to trigger a focused screenshot */
+const ROI_MIN_NEW_ELEMENTS = 3;
+/** Padding around the ROI bounding box (pixels) */
+const ROI_PADDING = 50;
+/** Maximum ROI area as fraction of viewport (above this, use full viewport) */
+const ROI_MAX_VIEWPORT_FRACTION = 0.5;
+
+/**
+ * Compute a region of interest from newly appeared elements.
+ * Returns a clip region if new elements define a focused area, null otherwise.
+ */
+function computeRegionOfInterest(
+  previousElementIds: Set<string>,
+  currentElements: PageElement[],
+  lastClickedElement: PageElement | null,
+  viewport: { width: number; height: number }
+): ClipRegion | null {
+  // Find elements that are new (not in previous set)
+  const newElements = currentElements.filter(el =>
+    el.isVisible && el.isEnabled && !previousElementIds.has(elementKey(el))
+  );
+
+  if (newElements.length < ROI_MIN_NEW_ELEMENTS) return null;
+
+  // Compute bounding box of all new elements
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  for (const el of newElements) {
+    minX = Math.min(minX, el.bounds.x);
+    minY = Math.min(minY, el.bounds.y);
+    maxX = Math.max(maxX, el.bounds.x + el.bounds.width);
+    maxY = Math.max(maxY, el.bounds.y + el.bounds.height);
+  }
+
+  // Include the trigger element (last clicked) to show context
+  if (lastClickedElement) {
+    const b = lastClickedElement.bounds;
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+
+  // Add padding and clamp to viewport
+  minX = Math.max(0, Math.floor(minX - ROI_PADDING));
+  minY = Math.max(0, Math.floor(minY - ROI_PADDING));
+  maxX = Math.min(viewport.width, Math.ceil(maxX + ROI_PADDING));
+  maxY = Math.min(viewport.height, Math.ceil(maxY + ROI_PADDING));
+
+  const width = maxX - minX;
+  const height = maxY - minY;
+
+  // If ROI is too large relative to viewport, not worth focusing
+  const roiArea = width * height;
+  const viewportArea = viewport.width * viewport.height;
+  if (roiArea >= viewportArea * ROI_MAX_VIEWPORT_FRACTION) return null;
+
+  return { x: minX, y: minY, width, height };
+}
+
+/**
+ * Generate a stable key for an element (for tracking across iterations).
+ * Uses selector + tag + text since IDs are reassigned each analysis cycle.
+ */
+function elementKey(el: PageElement): string {
+  return `${el.selector}|${el.tag}|${el.text?.slice(0, 30) ?? ''}`;
+}
+
 interface BatchActionResult {
   actionDesc: string;
   success: boolean;
@@ -139,6 +216,18 @@ async function getScroll(browser: Browser): Promise<{ x: number; y: number }> {
   } catch {
     return { x: 0, y: 0 };
   }
+}
+
+/**
+ * Format tab list for LLM prompt injection.
+ * Returns null if only one tab is open (no need to clutter the prompt).
+ */
+function formatTabInfo(tabs: TabInfo[]): string | null {
+  if (tabs.length <= 1) return null;
+  const lines = tabs.map(t =>
+    `  [${t.id}]${t.active ? ' (active)' : ''} ${t.url} — "${t.title}"`
+  );
+  return ['OPEN TABS:', ...lines].join('\n');
 }
 
 /**
@@ -264,6 +353,16 @@ async function executeBatch(
     if (!execResult.success) {
       callbacks.onError(actionDesc, execResult.error!);
       bailReason = `action failed: ${execResult.error}`;
+      break;
+    }
+
+    // Context-changing actions — bail after execution (page state is now different)
+    if (action.type === 'navigate' || action.type === 'newTab' || action.type === 'switchTab' || action.type === 'closeTab') {
+      urlChanged = action.type === 'navigate';
+      if (i < actions.length - 1) {
+        bailReason = `${action.type} changes page context`;
+        debug('Batch bail: %s action changes page context', action.type);
+      }
       break;
     }
 
@@ -560,6 +659,11 @@ async function runGoal(
   // Track feedback about the last action's result
   let lastActionFeedback: string | null = null;
 
+  // Track previous elements for ROI detection (sight mode)
+  let previousElementKeys = new Set<string>();
+  let activeClip: ClipRegion | null = null;
+  let lastClickedElement: PageElement | null = null;
+
   debug('Starting goal %d: %s (sightMode: %s, session: %s)', goalIndex + 1, goal, sightMode, llmSessionId.slice(0, 8));
 
   // Initialize speech bubble
@@ -626,29 +730,66 @@ async function runGoal(
         debug('Injecting playbook summary (%d chars) into prompt', playbookSummary.length);
       }
 
+      // Query open tabs for prompt injection (only if browser supports tabs)
+      let tabInfo: string | null = null;
+      if (browser.listTabs) {
+        try {
+          const tabs = await browser.listTabs();
+          tabInfo = formatTabInfo(tabs);
+          if (tabInfo) {
+            debug('Injecting tab info (%d tabs) into prompt', tabs.length);
+          }
+        } catch {
+          debug('Tab listing failed (browser may not support tabs)');
+        }
+      }
+
       let navigatorPromise: Promise<BatchThinkingResult | VisionBatchThinkingResult>;
 
       if (sightMode) {
         // SIGHT MODE: Use annotated screenshot for decision-making
 
-        // Inject annotations onto the page
-        await browser.evaluate(getAnnotationScript(pageState.elements));
-        debug('Annotations injected (%d elements)', pageState.elements.length);
+        // Detect region of interest (new elements that appeared since last iteration)
+        const viewport = await getViewport(browser);
+        const roi = computeRegionOfInterest(
+          previousElementKeys, pageState.elements, lastClickedElement, viewport
+        );
+        activeClip = roi;
 
-        // Capture annotated screenshot
-        const screenshot = await browser.screenshot();
-        debug('Annotated screenshot captured (%d bytes)', screenshot.length);
+        let screenshot: Buffer | string;
+        let elementLegend: string;
 
-        // Remove annotations
-        await browser.evaluate(getRemoveAnnotationScript());
+        if (roi) {
+          // FOCUSED MODE: Annotate only elements within the ROI, take clip screenshot
+          const roiElements = pageState.elements.filter(el => isElementInRegion(el, roi));
+          debug('ROI detected: %dx%d at (%d,%d) — %d/%d elements in view',
+            roi.width, roi.height, roi.x, roi.y, roiElements.length, pageState.elements.length);
 
-        // Generate element legend for the prompt
-        const elementLegend = formatElementLegend(pageState.elements);
+          await browser.evaluate(getAnnotationScript(roiElements));
+          screenshot = await browser.screenshot({ clip: roi });
+          await browser.evaluate(getRemoveAnnotationScript());
 
-        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+          elementLegend = formatFocusedElementLegend(pageState.elements, roi);
+          debug('Focused screenshot captured (%d bytes, %d annotated)', screenshot.length, roiElements.length);
+        } else {
+          // FULL VIEWPORT: Standard behavior
+          await browser.evaluate(getAnnotationScript(pageState.elements));
+          debug('Annotations injected (%d elements)', pageState.elements.length);
+
+          screenshot = await browser.screenshot();
+          debug('Annotated screenshot captured (%d bytes)', screenshot.length);
+
+          await browser.evaluate(getRemoveAnnotationScript());
+          elementLegend = formatElementLegend(pageState.elements);
+        }
+
+        // Update previous element tracking for next iteration
+        previousElementKeys = new Set(pageState.elements.map(el => elementKey(el)));
+
+        navigatorPromise = getNextActionFromScreenshot(persona, goal, screenshot, elementLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
       } else {
         // STANDARD MODE: Use HTML analysis for decision-making
-        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+        navigatorPromise = getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
       }
 
       // Build the observer LLM call (if enabled and page content was extracted)
@@ -684,9 +825,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
           }
         }
 
@@ -709,9 +850,9 @@ async function runGoal(
             const retryScreenshot = await browser.screenshot();
             await browser.evaluate(getRemoveAnnotationScript());
             const retryLegend = formatElementLegend(pageState.elements);
-            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+            navigatorResult = await getNextActionFromScreenshot(persona, goal, retryScreenshot, retryLegend, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
           } else {
-            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary);
+            navigatorResult = await getNextAction(persona, goal, pageState, actionHistory, docIndex, lastReadContent, llmSessionId, lastActionFeedback, playbookSummary, tabInfo);
           }
         }
       }
@@ -755,12 +896,16 @@ async function runGoal(
         actionsToExecute = visionResult.actions.map(vAction => {
           // Coordinate fallback: LLM specified x/y instead of elementId
           if (vAction.x !== undefined && vAction.y !== undefined && vAction.elementId === undefined) {
-            debug('Vision coordinate fallback: click at (%d, %d)', vAction.x, vAction.y);
+            // If using a focused screenshot, offset coordinates from clip-relative to viewport-relative
+            const viewportX = activeClip ? activeClip.x + vAction.x : vAction.x;
+            const viewportY = activeClip ? activeClip.y + vAction.y : vAction.y;
+            debug('Vision coordinate fallback: click at (%d, %d)%s', viewportX, viewportY,
+              activeClip ? ` (clip-offset from ${vAction.x},${vAction.y})` : '');
             return {
               ...vAction,
               // Store coordinates as sourceX/sourceY so action executor can use mouse.click
-              sourceX: vAction.x,
-              sourceY: vAction.y,
+              sourceX: viewportX,
+              sourceY: viewportY,
             };
           }
 
@@ -775,8 +920,21 @@ async function runGoal(
             debug('Vision resolved element [%d]: %s', vAction.elementId, element.selector ?? 'no selector');
           }
 
+          // Apply clip offset to coordinate-based drag actions
+          const clipOffsetAction = { ...vAction };
+          if (activeClip && vAction.type === 'drag') {
+            if (vAction.sourceX !== undefined && vAction.sourceY !== undefined) {
+              clipOffsetAction.sourceX = activeClip.x + vAction.sourceX;
+              clipOffsetAction.sourceY = activeClip.y + vAction.sourceY;
+            }
+            if (vAction.targetX !== undefined && vAction.targetY !== undefined) {
+              clipOffsetAction.targetX = activeClip.x + vAction.targetX;
+              clipOffsetAction.targetY = activeClip.y + vAction.targetY;
+            }
+          }
+
           return {
-            ...vAction,
+            ...clipOffsetAction,
             elementId: element?.id,
             selector: element?.selector,
             targetElementId: dragTarget?.id,
@@ -898,8 +1056,32 @@ async function runGoal(
         }
       }
 
+      // Re-inject speech bubble after tab/navigation changes (new page context)
+      const lastExecutedAction = actionsToExecute[Math.min(batchResult.completedCount, actionsToExecute.length) - 1];
+      if (lastExecutedAction && (
+        lastExecutedAction.type === 'navigate' ||
+        lastExecutedAction.type === 'newTab' ||
+        lastExecutedAction.type === 'switchTab'
+      )) {
+        try {
+          await browser.evaluate(getInitScript(persona.persona.name));
+          debug('Re-injected speech bubble after %s', lastExecutedAction.type);
+        } catch {
+          debug('Failed to re-inject speech bubble after %s', lastExecutedAction.type);
+        }
+      }
+
       // Build feedback for next LLM iteration
       lastActionFeedback = formatBatchFeedback(batchResult.results, batchResult.bailReason);
+
+      // Track last clicked element for ROI detection (sight mode)
+      if (sightMode) {
+        if (lastExecutedAction?.type === 'click' && lastExecutedAction.elementId !== undefined) {
+          lastClickedElement = pageState.elements.find(el => el.id === lastExecutedAction.elementId) ?? null;
+        } else {
+          lastClickedElement = null;
+        }
+      }
 
       // Clear last read content after using it (it's been included in this iteration's context)
       documentWriter.clearLastReadContent();

@@ -9,6 +9,19 @@ import type { DocumentWriter } from './document-writer.js';
 
 const debug = createDebug('abra:executor');
 
+export interface TabInfo {
+  id: string;
+  url: string;
+  title: string;
+  active: boolean;
+}
+
+export interface ScreenshotOptions {
+  clip?: { x: number; y: number; width: number; height: number };
+  selector?: string;
+  fullPage?: boolean;
+}
+
 // Browser interface (subset of puppet API we need)
 export interface Browser {
   click(selector: string): Promise<void>;
@@ -20,13 +33,20 @@ export interface Browser {
   wait(ms: number): Promise<void>;
   waitForLoaded(timeout?: number): Promise<void>;
   evaluate(script: string): Promise<unknown>;
-  screenshot(): Promise<Buffer | string>;
+  screenshot(options?: ScreenshotOptions): Promise<Buffer | string>;
   // Press a key (Enter, Escape, Tab, etc.)
   press?(key: string): Promise<void>;
   // Optional coordinate-based click for fallback
   mouse?: {
     click(x: number, y: number): Promise<void>;
   };
+  // Navigation
+  goto?(url: string): Promise<void>;
+  // Tab management
+  newTab?(url?: string): Promise<string>;
+  switchTab?(tabId: string): Promise<void>;
+  closeTab?(tabId?: string): Promise<void>;
+  listTabs?(): Promise<TabInfo[]>;
 }
 
 export interface ExecutionResult {
@@ -404,6 +424,36 @@ export async function executeAction(
           default:
             throw new Error(`Unknown document operation: ${operation}`);
         }
+        break;
+      }
+
+      case 'navigate': {
+        if (!action.url) throw new Error('No URL for navigate action');
+        if (!browser.goto) throw new Error('Browser does not support navigation');
+        debug('Navigating to:', action.url);
+        await browser.goto(action.url);
+        break;
+      }
+
+      case 'newTab': {
+        if (!browser.newTab) throw new Error('Browser does not support tab management');
+        debug('Opening new tab%s', action.url ? `: ${action.url}` : '');
+        await browser.newTab(action.url);
+        break;
+      }
+
+      case 'switchTab': {
+        if (!browser.switchTab) throw new Error('Browser does not support tab management');
+        if (!action.tabId) throw new Error('No tabId for switchTab action');
+        debug('Switching to tab:', action.tabId);
+        await browser.switchTab(action.tabId);
+        break;
+      }
+
+      case 'closeTab': {
+        if (!browser.closeTab) throw new Error('Browser does not support tab management');
+        debug('Closing tab:', action.tabId || 'active');
+        await browser.closeTab(action.tabId);
         break;
       }
 

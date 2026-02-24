@@ -46,7 +46,7 @@ src/
 - Uses Claude CLI via child_process spawn
 - Builds prompts with persona context + page state + goal
 - Returns structured JSON: thought + actions[] + confidence (batch format)
-- Supports actions: click, type, press, scroll, hover, drag, wait, done, failed, document
+- Supports actions: click, type, press, scroll, hover, drag, wait, navigate, newTab, switchTab, closeTab, done, failed, document
 - Backward compatible: parser accepts both single `action` and batch `actions` format
 
 ### Speech Bubble
@@ -86,6 +86,26 @@ src/
 - Success/failure tracking per playbook for reliability assessment
 - `--no-playbooks` CLI flag disables playbook recording and replay
 - Replaces: domain knowledge (JSONL), state observer, label resolution
+
+### Multi-Tab Navigation
+- `navigate` action: go to any URL in the current tab
+- `newTab` action: open a new browser tab (optionally with URL)
+- `switchTab`/`closeTab`: manage multiple open tabs
+- All tabs share cookies/session storage (same browser context)
+- Tab info injected into LLM prompt when multiple tabs are open
+- Speech bubble re-injected on tab switch (different page context)
+- Context-changing actions (navigate, newTab, switchTab) auto-bail from batch execution
+- Puppet changes: new tab commands (newTab, switchTab, closeTab, listTabs) in types, session handler, and fluent API
+
+### Adaptive Focus Screenshots (Sight Mode)
+- Detects "region of interest" (ROI) when new elements appear (dropdowns, modals, popovers)
+- Computes bounding box of new elements + trigger element with padding
+- When ROI is < 50% of viewport area: takes focused clip screenshot instead of full viewport
+- Annotates only elements within the ROI for less visual noise
+- Enhanced element legend: groups elements as "in view" (annotated) vs "off-screen" (still referenceable by ID)
+- Coordinate offset: LLM's x/y coordinates from focused screenshots are mapped back to viewport space
+- Falls back to full viewport when no ROI exists, on first iteration, or when ROI is too large
+- Uses Puppet's `screenshot({ clip: { x, y, width, height } })` option
 
 ### Shadow DOM Click Support
 - `deepElementFromPoint(x, y)` pierces shadow DOM to find actual element

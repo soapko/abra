@@ -63,6 +63,8 @@ export {
   getElementCenter,
   getHumanDelay,
   type Browser,
+  type TabInfo,
+  type ScreenshotOptions,
   type ExecutionResult,
 } from './lib/action-executor.js';
 

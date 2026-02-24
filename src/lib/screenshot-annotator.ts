@@ -145,45 +145,107 @@ export function formatElementLegend(elements: PageElement[]): string {
   for (const el of elements) {
     if (!el.isVisible || !el.isEnabled) continue;
     if (el.bounds.width <= 5 || el.bounds.height <= 5) continue;
-
-    const parts: string[] = [`[${el.id}]`];
-
-    // Element type
-    if (el.tag === 'a') {
-      parts.push('Link');
-    } else if (el.tag === 'button' || el.role === 'button') {
-      parts.push('Button');
-    } else if (el.tag === 'input') {
-      parts.push(`Input(${el.type || 'text'})`);
-    } else if (el.tag === 'select') {
-      parts.push('Dropdown');
-    } else if (el.tag === 'textarea') {
-      parts.push('TextArea');
-    } else {
-      parts.push(el.tag);
-    }
-
-    // Label/text
-    if (el.text) {
-      parts.push(`"${el.text.slice(0, 40)}${el.text.length > 40 ? '...' : ''}"`);
-    } else if (el.ariaLabel) {
-      parts.push(`[${el.ariaLabel}]`);
-    } else if (el.placeholder) {
-      parts.push(`(${el.placeholder})`);
-    } else if (el.testId) {
-      parts.push(`{${el.testId}}`);
-    }
-
-    // Add position context to help LLM identify elements
-    const posDesc = getPositionDescription(el.bounds);
-    if (posDesc) {
-      parts.push(`@${posDesc}`);
-    }
-
-    lines.push('  ' + parts.join(' '));
+    lines.push('  ' + formatElementEntry(el));
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Check if an element's bounds overlap with a clip region
+ */
+export function isElementInRegion(
+  element: PageElement,
+  clip: { x: number; y: number; width: number; height: number }
+): boolean {
+  const b = element.bounds;
+  return (
+    b.x + b.width > clip.x &&
+    b.x < clip.x + clip.width &&
+    b.y + b.height > clip.y &&
+    b.y < clip.y + clip.height
+  );
+}
+
+/**
+ * Format element legend for a focused (clipped) screenshot.
+ * Groups elements into "in view" (annotated in screenshot) and "off-screen" (still referenceable by ID).
+ */
+export function formatFocusedElementLegend(
+  elements: PageElement[],
+  clip: { x: number; y: number; width: number; height: number }
+): string {
+  const lines: string[] = [
+    `FOCUSED VIEW: Zoomed into area (x:${clip.x} y:${clip.y} w:${clip.width} h:${clip.height})`,
+    '',
+    'Elements in view (annotated in screenshot):',
+  ];
+
+  const inView: PageElement[] = [];
+  const offScreen: PageElement[] = [];
+
+  for (const el of elements) {
+    if (!el.isVisible || !el.isEnabled) continue;
+    if (el.bounds.width <= 5 || el.bounds.height <= 5) continue;
+
+    if (isElementInRegion(el, clip)) {
+      inView.push(el);
+    } else {
+      offScreen.push(el);
+    }
+  }
+
+  for (const el of inView) {
+    lines.push('  ' + formatElementEntry(el));
+  }
+
+  if (offScreen.length > 0) {
+    lines.push('');
+    lines.push('Other elements (not shown in screenshot, still referenceable by ID):');
+    for (const el of offScreen) {
+      lines.push('  ' + formatElementEntry(el));
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format a single element entry for the legend
+ */
+function formatElementEntry(el: PageElement): string {
+  const parts: string[] = [`[${el.id}]`];
+
+  if (el.tag === 'a') {
+    parts.push('Link');
+  } else if (el.tag === 'button' || el.role === 'button') {
+    parts.push('Button');
+  } else if (el.tag === 'input') {
+    parts.push(`Input(${el.type || 'text'})`);
+  } else if (el.tag === 'select') {
+    parts.push('Dropdown');
+  } else if (el.tag === 'textarea') {
+    parts.push('TextArea');
+  } else {
+    parts.push(el.tag);
+  }
+
+  if (el.text) {
+    parts.push(`"${el.text.slice(0, 40)}${el.text.length > 40 ? '...' : ''}"`);
+  } else if (el.ariaLabel) {
+    parts.push(`[${el.ariaLabel}]`);
+  } else if (el.placeholder) {
+    parts.push(`(${el.placeholder})`);
+  } else if (el.testId) {
+    parts.push(`{${el.testId}}`);
+  }
+
+  const posDesc = getPositionDescription(el.bounds);
+  if (posDesc) {
+    parts.push(`@${posDesc}`);
+  }
+
+  return parts.join(' ');
 }
 
 /**

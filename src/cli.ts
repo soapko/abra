@@ -285,6 +285,13 @@ program
                   `);
                 }
               },
+              // Navigation
+              goto: (url: string) => browser.goto(url),
+              // Tab management
+              newTab: (url?: string) => browser.newTab(url),
+              switchTab: (tabId: string) => browser.switchTab(tabId),
+              closeTab: (tabId?: string) => browser.closeTab(tabId),
+              listTabs: () => browser.listTabs(),
               // Mouse for coordinate-based clicking (fallback when selectors fail)
               mouse: {
                 click: async (x: number, y: number) => {

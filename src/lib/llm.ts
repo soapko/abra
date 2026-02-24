@@ -20,7 +20,7 @@ const CLAUDE_PATHS = [
 ].filter(Boolean) as string[];
 
 // Action types the LLM can request
-export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'drag' | 'wait' | 'done' | 'failed' | 'document';
+export type ActionType = 'click' | 'type' | 'press' | 'scroll' | 'hover' | 'drag' | 'wait' | 'navigate' | 'newTab' | 'switchTab' | 'closeTab' | 'done' | 'failed' | 'document';
 
 // Document operations for the document action type
 export type DocumentOperation = 'create' | 'read' | 'update' | 'append';
@@ -52,6 +52,10 @@ export interface Action {
   amount?: number;
   // Wait duration in ms
   duration?: number;
+  // URL for navigate/newTab actions
+  url?: string;
+  // Tab ID for switchTab/closeTab actions
+  tabId?: string;
   // Reason for done/failed
   reason?: string;
   // LLM-provided name for this sequence (for playbook recording)
@@ -109,7 +113,7 @@ Your response MUST be valid JSON with this exact structure:
   "sequenceName": "optional short name for this action sequence (for future replay)",
   "actions": [
     {
-      "type": "click|type|press|scroll|hover|drag|wait|done|failed",
+      "type": "click|type|press|scroll|hover|drag|wait|navigate|newTab|switchTab|closeTab|done|failed",
       "elementId": <number if clicking/typing/hovering/dragging on an element>,
       "playbook": "<name of a stored playbook to replay>",
       "selector": "<selector string if needed>",
@@ -117,6 +121,8 @@ Your response MUST be valid JSON with this exact structure:
       "targetSelector": "<target selector for drag>",
       "text": "<text to type if type action>",
       "key": "<key to press>",
+      "url": "<URL for navigate/newTab>",
+      "tabId": "<tab ID for switchTab/closeTab>",
       "direction": "up|down (if scroll)",
       "amount": <pixels to scroll>,
       "duration": <ms to wait>,
@@ -143,6 +149,7 @@ ALWAYS batch these patterns (2-5 actions):
 Only use a SINGLE action when:
 - You genuinely don't know what will appear (first visit, no stored playbooks)
 - The action causes navigation to a new page
+- The action is navigate, newTab, or switchTab (these change page context and MUST be the last action in a batch)
 
 STORED PLAYBOOKS:
 If a "STORED PLAYBOOKS" section lists playbooks in the prompt, you may reference them by exact name:
@@ -178,6 +185,25 @@ Use "drag" when you need to click-and-drag an element to another location. This 
 - Sortable lists, kanban boards, drag-and-drop interfaces
 Specify elementId for the source (what to grab) and targetElementId for the destination (where to drop).
 
+NAVIGATION & TAB MANAGEMENT:
+You can navigate to any URL and manage multiple browser tabs:
+
+- navigate: Go to a URL in the current tab
+  {"type": "navigate", "url": "https://gmail.com"}
+
+- newTab: Open a new tab (optionally navigate to a URL)
+  {"type": "newTab", "url": "https://gmail.com"}
+
+- switchTab: Switch to a different open tab by its ID
+  {"type": "switchTab", "tabId": "1"}
+
+- closeTab: Close a tab (defaults to active tab, or specify tabId)
+  {"type": "closeTab", "tabId": "2"}
+
+All tabs share cookies and session storage, so logging in on one tab carries over.
+navigate, newTab, and switchTab MUST be the LAST action in a batch (they change page context).
+When multiple tabs are open, the prompt will include an OPEN TABS section showing all tabs.
+
 Rules:
 - Use "done" when you believe the goal has been achieved
 - Use "failed" if you cannot find a way to achieve the goal
@@ -197,11 +223,18 @@ function buildUserPrompt(
   documentIndex?: string,
   lastReadContent?: string | null,
   lastActionFeedback?: string | null,
-  playbookSummary?: string | null
+  playbookSummary?: string | null,
+  tabInfo?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
   ];
+
+  // Tab info — so LLM knows about other open tabs
+  if (tabInfo) {
+    parts.push('');
+    parts.push(tabInfo);
+  }
 
   // Playbook summary BEFORE page elements — so LLM reads it first and can plan ahead
   if (playbookSummary) {
@@ -420,10 +453,11 @@ export async function getNextAction(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null,
-  playbookSummary?: string | null
+  playbookSummary?: string | null,
+  tabInfo?: string | null
 ): Promise<BatchThinkingResult> {
   const systemPrompt = buildSystemPrompt(persona);
-  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary);
+  const userPrompt = buildUserPrompt(goal, pageState, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary, tabInfo);
 
   debug('Getting next action for goal:', goal);
   debug('Page has %d elements', pageState.elements.length);
@@ -457,7 +491,7 @@ Your response MUST be valid JSON with this exact structure:
   "sequenceName": "optional short name for this action sequence (for future replay)",
   "actions": [
     {
-      "type": "click|type|press|scroll|hover|drag|wait|done|failed",
+      "type": "click|type|press|scroll|hover|drag|wait|navigate|newTab|switchTab|closeTab|done|failed",
       "elementId": <the number from the red label, e.g. 5 for [5]>,
       "playbook": "<name of a stored playbook to replay>",
       "x": <pixel x coordinate for coordinate fallback click>,
@@ -469,6 +503,8 @@ Your response MUST be valid JSON with this exact structure:
       "targetY": <pixel y destination for coordinate-based drag>,
       "text": "<text to type if type action>",
       "key": "<key to press: Enter, Escape, Tab, ArrowDown, ArrowUp>",
+      "url": "<URL for navigate/newTab>",
+      "tabId": "<tab ID for switchTab/closeTab>",
       "direction": "up|down (if scroll)",
       "amount": <pixels to scroll>,
       "duration": <ms to wait>,
@@ -495,6 +531,7 @@ ALWAYS batch these patterns (2-5 actions):
 Only use a SINGLE action when:
 - You genuinely don't know what will appear (first visit, no stored playbooks)
 - The action causes navigation to a new page
+- The action is navigate, newTab, or switchTab (these change page context and MUST be the last action in a batch)
 
 STORED PLAYBOOKS:
 If a "STORED PLAYBOOKS" section lists playbooks in the prompt, you may reference them by exact name:
@@ -529,8 +566,36 @@ If you see an interactive element in the screenshot that has NO red numbered lab
 (e.g., color swatches, popover items, dropdown options that appeared after an action),
 you may specify a coordinate-based click using "x" and "y" fields instead of "elementId":
 {"type": "click", "x": 450, "y": 320}
-Estimate coordinates from the screenshot (viewport is typically 1440x900).
 Only use this when no annotated element covers what you need to click.
+
+FOCUSED SCREENSHOTS:
+Sometimes the screenshot shows a zoomed-in view of a specific area (e.g., an open dropdown,
+a modal, or a form section) rather than the full viewport. When this happens:
+- The Element Legend will say "FOCUSED VIEW" and list the clip coordinates
+- Elements in the view are annotated with red labels as usual
+- Elements outside the view are listed in the legend but NOT visible in the screenshot
+- You can still reference off-screen elements by their [number] from the legend
+- If using x/y coordinate clicks, coordinates are relative to the VISIBLE image area
+  (the system automatically maps them to viewport coordinates)
+
+NAVIGATION & TAB MANAGEMENT:
+You can navigate to any URL and manage multiple browser tabs:
+
+- navigate: Go to a URL in the current tab
+  {"type": "navigate", "url": "https://gmail.com"}
+
+- newTab: Open a new tab (optionally navigate to a URL)
+  {"type": "newTab", "url": "https://gmail.com"}
+
+- switchTab: Switch to a different open tab by its ID
+  {"type": "switchTab", "tabId": "1"}
+
+- closeTab: Close a tab (defaults to active tab, or specify tabId)
+  {"type": "closeTab", "tabId": "2"}
+
+All tabs share cookies and session storage, so logging in on one tab carries over.
+navigate, newTab, and switchTab MUST be the LAST action in a batch (they change page context).
+When multiple tabs are open, the prompt will include an OPEN TABS section showing all tabs.
 
 Rules:
 - CRITICAL: Look at the RED numbered labels [0], [1], [2] etc in the screenshot and use the EXACT number for the element you want to interact with
@@ -557,11 +622,18 @@ function buildVisionUserPrompt(
   documentIndex?: string,
   lastReadContent?: string | null,
   lastActionFeedback?: string | null,
-  playbookSummary?: string | null
+  playbookSummary?: string | null,
+  tabInfo?: string | null
 ): string {
   const parts: string[] = [
     `CURRENT GOAL: ${goal}`,
   ];
+
+  // Tab info — so LLM knows about other open tabs
+  if (tabInfo) {
+    parts.push('');
+    parts.push(tabInfo);
+  }
 
   // Playbook summary BEFORE element legend — so LLM reads it first
   if (playbookSummary) {
@@ -822,10 +894,11 @@ export async function getNextActionFromScreenshot(
   lastReadContent?: string | null,
   sessionId?: string,
   lastActionFeedback?: string | null,
-  playbookSummary?: string | null
+  playbookSummary?: string | null,
+  tabInfo?: string | null
 ): Promise<VisionBatchThinkingResult> {
   const systemPrompt = buildVisionSystemPrompt(persona);
-  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary);
+  const userPrompt = buildVisionUserPrompt(goal, elementLegend, previousActions, documentIndex, lastReadContent, lastActionFeedback, playbookSummary, tabInfo);
 
   debug('Getting next action from screenshot for goal:', goal);
 
@@ -861,6 +934,14 @@ export function formatAction(action: Action): string {
       return `Hovered over element ${action.elementId}`;
     case 'wait':
       return `Waited ${action.duration}ms`;
+    case 'navigate':
+      return `Navigated to ${action.url}`;
+    case 'newTab':
+      return `Opened new tab${action.url ? `: ${action.url}` : ''}`;
+    case 'switchTab':
+      return `Switched to tab ${action.tabId}`;
+    case 'closeTab':
+      return `Closed tab ${action.tabId || 'active'}`;
     case 'document':
       return `Document ${action.document?.operation}: ${action.document?.filename}`;
     case 'done':
@@ -900,6 +981,14 @@ export function formatVisionAction(action: VisionAction): string {
       return `[sight] Hovered over${elemRef}`;
     case 'wait':
       return `[sight] Waited ${action.duration}ms`;
+    case 'navigate':
+      return `[sight] Navigated to ${action.url}`;
+    case 'newTab':
+      return `[sight] Opened new tab${action.url ? `: ${action.url}` : ''}`;
+    case 'switchTab':
+      return `[sight] Switched to tab ${action.tabId}`;
+    case 'closeTab':
+      return `[sight] Closed tab ${action.tabId || 'active'}`;
     case 'document':
       return `[sight] Document ${action.document?.operation}: ${action.document?.filename}`;
     case 'done':

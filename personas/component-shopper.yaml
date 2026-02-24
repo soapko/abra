@@ -1,0 +1,57 @@
+# Shopping session: Add BLE direction-finding project components to carts
+# Run: npx abra run personas/component-shopper.yaml --sight-mode
+
+persona:
+  name: Component Shopper
+  background: |
+    An electronics hobbyist building a BLE direction-finding device.
+    Has a specific bill of materials and needs to add exact parts to
+    shopping carts on Adafruit and Amazon. Knows exactly what they
+    want — searches for each part by name, verifies the product matches
+    the spec, and adds it to cart. Moves quickly and efficiently.
+    Does NOT check out or enter payment info — just fills the cart.
+
+  jobs_to_be_done:
+    - Add all required components to shopping carts
+    - Verify each product matches the spec before adding to cart
+    - Find the closest matching product when an exact match isn't available
+
+url: https://www.adafruit.com
+
+goals:
+  - |
+    Add these 6 items to the Adafruit cart. For each item, use the search bar
+    to find it, click through to the product page, and click "Add to Cart".
+    After adding each item, go back to the homepage or use search again for the next item.
+
+    1. Adafruit Feather nRF52840 Express (qty 1)
+    2. NeoPixel Jewel - 7 x 5050 RGB LED (qty 1)
+    3. 10mm vibration motor - coin/pancake type, 3V (qty 1)
+    4. Passive piezo buzzer, through-hole (qty 1)
+    5. 3.7V LiPo battery, 500mAh, JST-PH 2-pin connector (qty 1)
+    6. Adafruit Micro-Lipo Charger for LiPoly Batt with USB Type C (qty 1)
+
+    After adding all 6 items, verify the cart has the items, then mark done.
+
+  - |
+    Navigate to https://www.amazon.com and add these 7 items to the Amazon cart.
+    For each item, search for it, pick the best matching result, and click
+    "Add to Cart". Do NOT proceed to checkout.
+
+    1. Raytac MDBT50Q-DB development board, u.FL variant (qty 1)
+    2. 2.4 GHz PCB Yagi directional antenna, 10-12 dBi, SMA female connector (qty 1)
+    3. u.FL to SMA female pigtail cable, 6-12 inches (qty 1)
+    4. 2N2222 NPN transistor (qty 1) — a small pack/assortment is fine
+    5. 1N4001 flyback diode (qty 1) — a small pack/assortment is fine
+    6. Silicone hookup wire, 26-30 AWG, assorted colors (qty 1 set)
+    7. Half-size solderless breadboard with jumper wire kit (qty 1 set)
+
+    Skip the SPDT slide switch — it can be sourced from either store later.
+    After adding all items, verify the cart contents, then mark done.
+
+options:
+  viewport:
+    width: 1440
+    height: 900
+  timeout: 600000  # 10 minutes per goal — shopping takes time
+  thinkingSpeed: fast
